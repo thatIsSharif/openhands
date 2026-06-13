@@ -1,22 +1,19 @@
 """Execution store - persistence for execution records and automation entities.
 
-Follows the existing enterprise Store pattern (@dataclass with a_session_maker).
+Uses the OSS database session pattern (get_global_config().db_session).
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import contextlib
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from typing import AsyncGenerator
 
-from sqlalchemy import and_, select, update
+from sqlalchemy import and_, select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from openhands.app_server.utils.logger import openhands_logger as logger
-
-from storage.database import a_session_maker
-from storage.execution import Execution
-from storage.github_pull_request import GitHubPullRequest
-from storage.jira_issue import JiraIssue
-from storage.review_iteration import ReviewIteration
 
 from .execution_models import (
     ExecutionRecord,
@@ -26,11 +23,37 @@ from .execution_models import (
     ReviewIterationRecord,
     SourceType,
 )
+from .models import (
+    StoredExecution,
+    StoredGitHubPullRequest,
+    StoredJiraIssue,
+    StoredReviewIteration,
+)
 
 
 @dataclass
 class ExecutionStore:
-    """Manages execution records and related automation entities."""
+    """Manages execution records and related automation entities.
+
+    Each method opens its own session. Accepts an optional async_sessionmaker
+    for testability (defaults to the global config DB session).
+    """
+
+    session_maker: async_sessionmaker[AsyncSession] | None = field(default=None)
+
+    @contextlib.asynccontextmanager
+    async def _get_session(self) -> AsyncGenerator[AsyncSession, None]:
+        """Get an async session, from the provided maker or global config."""
+        if self.session_maker:
+            async with self.session_maker() as session:
+                yield session
+        else:
+            from openhands.app_server.config import get_global_config
+
+            config = get_global_config()
+            maker = await config.db_session.get_async_session_maker()
+            async with maker() as session:
+                yield session
 
     async def create_execution(
         self,
@@ -44,9 +67,11 @@ class ExecutionStore:
     ) -> ExecutionRecord:
         """Create a new execution record in RECEIVED state."""
         state = ExecutionState.RECEIVED.value
-        execution = Execution(
+        execution = StoredExecution(
             execution_id=execution_id,
-            source_type=source_type.value if isinstance(source_type, SourceType) else source_type,
+            source_type=source_type.value
+            if isinstance(source_type, SourceType)
+            else source_type,
             source_event_id=source_event_id,
             state=state,
             jira_issue_key=jira_issue_key,
@@ -54,7 +79,7 @@ class ExecutionStore:
             repository=repository,
             branch=branch,
         )
-        async with a_session_maker() as session:
+        async with self._get_session() as session:
             session.add(execution)
             await session.commit()
             await session.refresh(execution)
@@ -74,13 +99,17 @@ class ExecutionStore:
         """Update execution state and optional metadata."""
         now = datetime.now(timezone.utc)
 
-        async with a_session_maker() as session:
+        async with self._get_session() as session:
             result = await session.execute(
-                select(Execution).filter(Execution.execution_id == execution_id)
+                select(StoredExecution).filter(
+                    StoredExecution.execution_id == execution_id
+                )
             )
             execution = result.scalars().first()
             if not execution:
-                logger.warning(f'[Automation] Execution {execution_id} not found')
+                logger.warning(
+                    f'[Automation] Execution {execution_id} not found'
+                )
                 return None
 
             execution.state = state.value
@@ -92,13 +121,17 @@ class ExecutionStore:
                 execution.conversation_id = conversation_id
             if state == ExecutionState.RUNNING:
                 execution.started_at = now
-            if state in (ExecutionState.COMPLETED, ExecutionState.FAILED, ExecutionState.CANCELLED):
+            if state in (
+                ExecutionState.COMPLETED,
+                ExecutionState.FAILED,
+                ExecutionState.CANCELLED,
+            ):
                 execution.completed_at = now
 
             await session.commit()
             await session.refresh(execution)
             logger.info(
-                f'[Automation] Execution {execution_id} state → {state.value}'
+                f'[Automation] Execution {execution_id} state \u2192 {state.value}'
             )
             return self._record_from_model(execution)
 
@@ -106,9 +139,11 @@ class ExecutionStore:
         self, execution_id: str
     ) -> ExecutionRecord | None:
         """Get an execution record by execution_id."""
-        async with a_session_maker() as session:
+        async with self._get_session() as session:
             result = await session.execute(
-                select(Execution).filter(Execution.execution_id == execution_id)
+                select(StoredExecution).filter(
+                    StoredExecution.execution_id == execution_id
+                )
             )
             execution = result.scalars().first()
             return self._record_from_model(execution) if execution else None
@@ -117,10 +152,10 @@ class ExecutionStore:
         self, source_event_id: str
     ) -> ExecutionRecord | None:
         """Get execution by source event ID for idempotency checking."""
-        async with a_session_maker() as session:
+        async with self._get_session() as session:
             result = await session.execute(
-                select(Execution).filter(
-                    Execution.source_event_id == source_event_id
+                select(StoredExecution).filter(
+                    StoredExecution.source_event_id == source_event_id
                 )
             )
             execution = result.scalars().first()
@@ -136,28 +171,34 @@ class ExecutionStore:
         offset: int = 0,
     ) -> list[ExecutionRecord]:
         """List execution records with optional filters."""
-        async with a_session_maker() as session:
-            query = select(Execution)
+        async with self._get_session() as session:
+            query = select(StoredExecution)
 
             conditions = []
             if source_type:
-                conditions.append(Execution.source_type == source_type)
+                conditions.append(
+                    StoredExecution.source_type == source_type
+                )
             if state:
-                conditions.append(Execution.state == state.value)
+                conditions.append(StoredExecution.state == state.value)
             if jira_issue_key:
-                conditions.append(Execution.jira_issue_key == jira_issue_key)
+                conditions.append(
+                    StoredExecution.jira_issue_key == jira_issue_key
+                )
             if github_pr_number is not None:
-                conditions.append(Execution.github_pr_id == github_pr_number)
+                conditions.append(
+                    StoredExecution.github_pr_id == github_pr_number
+                )
 
             if conditions:
                 query = query.filter(and_(*conditions))
 
-            query = query.order_by(Execution.created_at.desc())
+            query = query.order_by(StoredExecution.created_at.desc())
             query = query.limit(limit).offset(offset)
 
             result = await session.execute(query)
-            executions = result.scalars().all()
-            return [self._record_from_model(e) for e in executions]
+            records = result.scalars().all()
+            return [self._record_from_model(r) for r in records]
 
     async def count_executions(
         self,
@@ -167,18 +208,24 @@ class ExecutionStore:
         repository: str | None = None,
     ) -> int:
         """Count execution records matching the given filters."""
-        async with a_session_maker() as session:
-            query = select(Execution)
+        async with self._get_session() as session:
+            query = select(StoredExecution)
 
             conditions = []
             if source_type:
-                conditions.append(Execution.source_type == source_type)
+                conditions.append(
+                    StoredExecution.source_type == source_type
+                )
             if state:
-                conditions.append(Execution.state == state.value)
+                conditions.append(StoredExecution.state == state.value)
             if jira_issue_key:
-                conditions.append(Execution.jira_issue_key == jira_issue_key)
+                conditions.append(
+                    StoredExecution.jira_issue_key == jira_issue_key
+                )
             if repository:
-                conditions.append(Execution.repository == repository)
+                conditions.append(
+                    StoredExecution.repository == repository
+                )
 
             if conditions:
                 query = query.filter(and_(*conditions))
@@ -201,9 +248,11 @@ class ExecutionStore:
         execution_id: int | None = None,
     ) -> JiraIssueRecord:
         """Create or update a Jira issue record."""
-        async with a_session_maker() as session:
+        async with self._get_session() as session:
             result = await session.execute(
-                select(JiraIssue).filter(JiraIssue.issue_key == issue_key)
+                select(StoredJiraIssue).filter(
+                    StoredJiraIssue.issue_key == issue_key
+                )
             )
             issue = result.scalars().first()
 
@@ -224,7 +273,7 @@ class ExecutionStore:
                 if execution_id is not None:
                     issue.execution_id = execution_id
             else:
-                issue = JiraIssue(
+                issue = StoredJiraIssue(
                     issue_key=issue_key,
                     summary=summary,
                     description=description,
@@ -255,12 +304,12 @@ class ExecutionStore:
         pr_url: str | None = None,
     ) -> GitHubPullRequestRecord:
         """Create or update a GitHub pull request record."""
-        async with a_session_maker() as session:
+        async with self._get_session() as session:
             result = await session.execute(
-                select(GitHubPullRequest).filter(
+                select(StoredGitHubPullRequest).filter(
                     and_(
-                        GitHubPullRequest.pr_number == pr_number,
-                        GitHubPullRequest.repository == repository,
+                        StoredGitHubPullRequest.pr_number == pr_number,
+                        StoredGitHubPullRequest.repository == repository,
                     )
                 )
             )
@@ -277,7 +326,7 @@ class ExecutionStore:
                 if pr_url is not None:
                     pr.pr_url = pr_url
             else:
-                pr = GitHubPullRequest(
+                pr = StoredGitHubPullRequest(
                     pr_number=pr_number,
                     repository=repository,
                     owner=owner,
@@ -306,7 +355,7 @@ class ExecutionStore:
         repository: str | None = None,
     ) -> ReviewIterationRecord:
         """Create a review iteration record."""
-        iteration = ReviewIteration(
+        iteration = StoredReviewIteration(
             execution_id=execution_id,
             iteration_number=iteration_number,
             review_comment_id=review_comment_id,
@@ -315,7 +364,7 @@ class ExecutionStore:
             pr_number=pr_number,
             repository=repository,
         )
-        async with a_session_maker() as session:
+        async with self._get_session() as session:
             session.add(iteration)
             await session.commit()
             await session.refresh(iteration)
@@ -329,20 +378,26 @@ class ExecutionStore:
         limit: int = 50,
     ) -> list[ReviewIterationRecord]:
         """List review iterations with optional filters."""
-        async with a_session_maker() as session:
-            query = select(ReviewIteration)
+        async with self._get_session() as session:
+            query = select(StoredReviewIteration)
             conditions = []
             if pr_number is not None:
-                conditions.append(ReviewIteration.pr_number == pr_number)
+                conditions.append(
+                    StoredReviewIteration.pr_number == pr_number
+                )
             if repository:
-                conditions.append(ReviewIteration.repository == repository)
+                conditions.append(
+                    StoredReviewIteration.repository == repository
+                )
             if execution_id is not None:
-                conditions.append(ReviewIteration.execution_id == execution_id)
+                conditions.append(
+                    StoredReviewIteration.execution_id == execution_id
+                )
 
             if conditions:
                 query = query.filter(and_(*conditions))
 
-            query = query.order_by(ReviewIteration.created_at.desc())
+            query = query.order_by(StoredReviewIteration.created_at.desc())
             query = query.limit(limit)
 
             result = await session.execute(query)
@@ -352,7 +407,9 @@ class ExecutionStore:
     # --- Private helpers ---
 
     @staticmethod
-    def _record_from_model(execution: Execution) -> ExecutionRecord:
+    def _record_from_model(
+        execution: StoredExecution,
+    ) -> ExecutionRecord:
         return ExecutionRecord(
             id=execution.id,
             execution_id=execution.execution_id,
@@ -372,7 +429,9 @@ class ExecutionStore:
         )
 
     @staticmethod
-    def _jira_record_from_model(issue: JiraIssue) -> JiraIssueRecord:
+    def _jira_record_from_model(
+        issue: StoredJiraIssue,
+    ) -> JiraIssueRecord:
         return JiraIssueRecord(
             id=issue.id,
             issue_key=issue.issue_key,
@@ -389,7 +448,9 @@ class ExecutionStore:
         )
 
     @staticmethod
-    def _github_pr_record_from_model(pr: GitHubPullRequest) -> GitHubPullRequestRecord:
+    def _github_pr_record_from_model(
+        pr: StoredGitHubPullRequest,
+    ) -> GitHubPullRequestRecord:
         return GitHubPullRequestRecord(
             id=pr.id,
             pr_number=pr.pr_number,
@@ -406,7 +467,7 @@ class ExecutionStore:
 
     @staticmethod
     def _review_record_from_model(
-        iteration: ReviewIteration,
+        iteration: StoredReviewIteration,
     ) -> ReviewIterationRecord:
         return ReviewIterationRecord(
             id=iteration.id,

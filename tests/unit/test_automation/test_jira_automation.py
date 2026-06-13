@@ -4,9 +4,7 @@ import hashlib
 import hmac
 import json
 
-import pytest
-
-from integrations.automation.jira_automation_service import (
+from openhands.app_server.automation.jira_automation_service import (
     compute_jira_event_id,
     extract_jira_issue_data,
     generate_jira_branch_name,
@@ -38,7 +36,7 @@ class TestVerifyJiraSignature:
         body = json.dumps({'event': 'test'}).encode()
         assert verify_jira_signature(body, '', 'test_secret') is False
 
-    def test_signature_with_sha1_prefix(self):
+    def test_signature_with_wrong_prefix(self):
         secret = 'test_secret'
         body = json.dumps({'event': 'test'}).encode()
         expected = hmac.new(
@@ -159,7 +157,6 @@ class TestGenerateJiraBranchName:
     def test_slug_truncation(self):
         long_summary = 'a' * 100
         branch = generate_jira_branch_name('KAN-17', 'Story', long_summary)
-        # Should not exceed reasonable length
         assert len(branch) < 100
 
     def test_special_characters_in_summary(self):
@@ -167,7 +164,6 @@ class TestGenerateJiraBranchName:
             'KAN-17', 'Story', 'Implement @#$%^& feature!'
         )
         assert 'feature' in branch
-        # No special characters
         assert all(
             c.isalnum() or c in '-/' for c in branch
         ), f'Branch has invalid chars: {branch}'

@@ -1,11 +1,15 @@
 """Tests for ExecutionService."""
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from integrations.automation.execution_models import ExecutionState, SourceType
-from integrations.automation.execution_service import ExecutionService
+from openhands.app_server.automation.execution_models import (
+    ExecutionRecord,
+    ExecutionState,
+    SourceType,
+)
+from openhands.app_server.automation.execution_service import ExecutionService
 
 
 @pytest.fixture
@@ -26,7 +30,7 @@ def execution_service(mock_store):
 class TestCreateExecution:
     async def test_creates_new_execution(self, execution_service, mock_store):
         mock_store.get_execution_by_source_event.return_value = None
-        mock_store.create_execution.return_value = MagicMock(
+        mock_store.create_execution.return_value = ExecutionRecord(
             execution_id='exec_test123',
             state=ExecutionState.RECEIVED,
         )
@@ -41,8 +45,10 @@ class TestCreateExecution:
         assert record.execution_id == 'exec_test123'
         mock_store.create_execution.assert_called_once()
 
-    async def test_returns_existing_on_duplicate(self, execution_service, mock_store):
-        mock_store.get_execution_by_source_event.return_value = MagicMock(
+    async def test_returns_existing_on_duplicate(
+        self, execution_service, mock_store
+    ):
+        mock_store.get_execution_by_source_event.return_value = ExecutionRecord(
             execution_id='exec_existing',
             state=ExecutionState.RECEIVED,
         )
@@ -57,7 +63,7 @@ class TestCreateExecution:
         mock_store.create_execution.assert_not_called()
 
     async def test_handles_no_event_id(self, execution_service, mock_store):
-        mock_store.create_execution.return_value = MagicMock(
+        mock_store.create_execution.return_value = ExecutionRecord(
             execution_id='exec_test', state=ExecutionState.RECEIVED
         )
 
@@ -71,11 +77,11 @@ class TestCreateExecution:
 
 class TestTransitionState:
     async def test_valid_transition(self, execution_service, mock_store):
-        mock_store.get_execution.return_value = MagicMock(
+        mock_store.get_execution.return_value = ExecutionRecord(
             execution_id='exec_test',
             state=ExecutionState.RECEIVED,
         )
-        mock_store.update_state.return_value = MagicMock(
+        mock_store.update_state.return_value = ExecutionRecord(
             execution_id='exec_test',
             state=ExecutionState.QUEUED,
         )
@@ -93,7 +99,7 @@ class TestTransitionState:
         )
 
     async def test_invalid_transition(self, execution_service, mock_store):
-        mock_store.get_execution.return_value = MagicMock(
+        mock_store.get_execution.return_value = ExecutionRecord(
             execution_id='exec_test',
             state=ExecutionState.RECEIVED,
         )

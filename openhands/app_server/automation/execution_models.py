@@ -28,7 +28,11 @@ class SourceType(str, Enum):
 VALID_TRANSITIONS: dict[ExecutionState, set[ExecutionState]] = {
     ExecutionState.RECEIVED: {ExecutionState.QUEUED, ExecutionState.CANCELLED},
     ExecutionState.QUEUED: {ExecutionState.RUNNING, ExecutionState.CANCELLED},
-    ExecutionState.RUNNING: {ExecutionState.COMPLETED, ExecutionState.FAILED, ExecutionState.CANCELLED},
+    ExecutionState.RUNNING: {
+        ExecutionState.COMPLETED,
+        ExecutionState.FAILED,
+        ExecutionState.CANCELLED,
+    },
     ExecutionState.COMPLETED: set(),
     ExecutionState.FAILED: set(),
     ExecutionState.CANCELLED: set(),
@@ -106,9 +110,7 @@ class ReviewIterationRecord:
     created_at: datetime | None = None
 
 
-def validate_transition(
-    current: ExecutionState, target: ExecutionState
-) -> None:
+def validate_transition(current: ExecutionState, target: ExecutionState) -> None:
     """Validate that a state transition is legal.
 
     Raises:
@@ -117,7 +119,7 @@ def validate_transition(
     allowed = VALID_TRANSITIONS.get(current, set())
     if target not in allowed:
         raise ValueError(
-            f'Invalid state transition: {current.value} → {target.value}. '
+            f'Invalid state transition: {current.value} \u2192 {target.value}. '
             f'Allowed transitions from {current.value}: '
             f'{", ".join(s.value for s in allowed) or "none"}'
         )

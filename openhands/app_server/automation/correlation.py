@@ -2,7 +2,7 @@
 
 Every automation execution generates a unique execution_id that is propagated
 through all layers: webhook ingestion, OpenHands conversation, GitHub operations,
-Jira operations, Langfuse traces, and structured logs.
+Jira operations, and structured logs.
 """
 
 from __future__ import annotations

@@ -2,7 +2,7 @@
 
 import pytest
 
-from integrations.automation.execution_models import (
+from openhands.app_server.automation.execution_models import (
     ExecutionState,
     SourceType,
     validate_transition,
@@ -11,31 +11,31 @@ from integrations.automation.execution_models import (
 
 class TestExecutionState:
     def test_received_to_queued(self):
-        """RECEIVED → QUEUED is valid."""
+        """RECEIVED \u2192 QUEUED is valid."""
         validate_transition(ExecutionState.RECEIVED, ExecutionState.QUEUED)
 
     def test_received_to_cancelled(self):
-        """RECEIVED → CANCELLED is valid."""
+        """RECEIVED \u2192 CANCELLED is valid."""
         validate_transition(ExecutionState.RECEIVED, ExecutionState.CANCELLED)
 
     def test_queued_to_running(self):
-        """QUEUED → RUNNING is valid."""
+        """QUEUED \u2192 RUNNING is valid."""
         validate_transition(ExecutionState.QUEUED, ExecutionState.RUNNING)
 
     def test_queued_to_cancelled(self):
-        """QUEUED → CANCELLED is valid."""
+        """QUEUED \u2192 CANCELLED is valid."""
         validate_transition(ExecutionState.QUEUED, ExecutionState.CANCELLED)
 
     def test_running_to_completed(self):
-        """RUNNING → COMPLETED is valid."""
+        """RUNNING \u2192 COMPLETED is valid."""
         validate_transition(ExecutionState.RUNNING, ExecutionState.COMPLETED)
 
     def test_running_to_failed(self):
-        """RUNNING → FAILED is valid."""
+        """RUNNING \u2192 FAILED is valid."""
         validate_transition(ExecutionState.RUNNING, ExecutionState.FAILED)
 
     def test_running_to_cancelled(self):
-        """RUNNING → CANCELLED is valid."""
+        """RUNNING \u2192 CANCELLED is valid."""
         validate_transition(ExecutionState.RUNNING, ExecutionState.CANCELLED)
 
     def test_invalid_transition_from_completed(self):
@@ -46,12 +46,12 @@ class TestExecutionState:
                     validate_transition(ExecutionState.COMPLETED, target)
 
     def test_invalid_transition_received_to_completed(self):
-        """RECEIVED → COMPLETED is invalid (skips QUEUED and RUNNING)."""
+        """RECEIVED \u2192 COMPLETED is invalid (skips QUEUED and RUNNING)."""
         with pytest.raises(ValueError, match='Invalid state transition'):
             validate_transition(ExecutionState.RECEIVED, ExecutionState.COMPLETED)
 
     def test_invalid_transition_queued_to_completed(self):
-        """QUEUED → COMPLETED is invalid (skips RUNNING)."""
+        """QUEUED \u2192 COMPLETED is invalid (skips RUNNING)."""
         with pytest.raises(ValueError, match='Invalid state transition'):
             validate_transition(ExecutionState.QUEUED, ExecutionState.COMPLETED)
 

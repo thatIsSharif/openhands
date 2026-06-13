@@ -2,7 +2,7 @@
 
 import re
 
-from integrations.automation.correlation import (
+from openhands.app_server.automation.correlation import (
     build_log_context,
     generate_conversation_title,
     generate_execution_id,

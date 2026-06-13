@@ -4,7 +4,7 @@ import hashlib
 import hmac
 import json
 
-from integrations.automation.github_automation_service import (
+from openhands.app_server.automation.github_automation_service import (
     compute_github_event_id,
     extract_github_review_data,
     verify_github_signature,
@@ -34,6 +34,16 @@ class TestVerifyGithubSignature:
     def test_empty_string(self):
         body = json.dumps({'event': 'test'}).encode()
         assert verify_github_signature(body, '', 'test_secret') is False
+
+    def test_wrong_prefix(self):
+        secret = 'test_secret'
+        body = json.dumps({'event': 'test'}).encode()
+        expected = hmac.new(
+            secret.encode(), body, hashlib.sha256
+        ).hexdigest()
+        # Wrong prefix (sha1= instead of sha256=)
+        header = f'sha1={expected}'
+        assert verify_github_signature(body, header, secret) is False
 
 
 class TestComputeGithubEventId:
@@ -94,7 +104,12 @@ class TestExtractGithubReviewData:
         assert data['comment_id'] == 98765
 
     def test_missing_required_fields(self):
-        payload = {'repository': {}, 'pull_request': {}, 'comment': {}, 'sender': {}}
+        payload = {
+            'repository': {},
+            'pull_request': {},
+            'comment': {},
+            'sender': {},
+        }
         data = extract_github_review_data(payload)
         assert data is None
 

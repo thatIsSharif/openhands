@@ -1,1 +1,0 @@
-"""Automation platform API routes."""
