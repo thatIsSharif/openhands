@@ -3,13 +3,16 @@ from storage.auth_tokens import AuthTokens
 from storage.billing_session import BillingSession
 from storage.billing_session_type import BillingSessionType
 from storage.conversation_work import ConversationWork
+from storage.execution import Execution
 from storage.feedback import ConversationFeedback, Feedback
 from storage.github_app_installation import GithubAppInstallation
+from storage.github_pull_request import GitHubPullRequest
 from storage.gitlab_webhook import GitlabWebhook, WebhookStatus
 from storage.jira_conversation import JiraConversation
 from storage.jira_dc_conversation import JiraDcConversation
 from storage.jira_dc_user import JiraDcUser
 from storage.jira_dc_workspace import JiraDcWorkspace
+from storage.jira_issue import JiraIssue
 from storage.jira_user import JiraUser
 from storage.jira_workspace import JiraWorkspace
 from storage.linear_conversation import LinearConversation
@@ -23,6 +26,7 @@ from storage.org_invitation import OrgInvitation
 from storage.org_member import OrgMember
 from storage.proactive_convos import ProactiveConversation
 from storage.resend_synced_user import ResendSyncedUser
+from storage.review_iteration import ReviewIteration
 from storage.role import Role
 from storage.slack_conversation import SlackConversation
 from storage.slack_team import SlackTeam
@@ -47,13 +51,16 @@ __all__ = [
     'ConversationFeedback',
     'StoredConversationMetadataSaas',
     'ConversationWork',
+    'Execution',
     'Feedback',
+    'GitHubPullRequest',
     'GithubAppInstallation',
     'GitlabWebhook',
     'JiraConversation',
     'JiraDcConversation',
     'JiraDcUser',
     'JiraDcWorkspace',
+    'JiraIssue',
     'JiraUser',
     'JiraWorkspace',
     'LinearConversation',
@@ -68,6 +75,7 @@ __all__ = [
     'OrgMember',
     'ProactiveConversation',
     'ResendSyncedUser',
+    'ReviewIteration',
     'Role',
     'SlackConversation',
     'SlackTeam',
