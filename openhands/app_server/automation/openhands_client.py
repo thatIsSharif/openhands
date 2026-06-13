@@ -15,6 +15,9 @@ from openhands.app_server.app_conversation.app_conversation_models import (
     AppConversationStartRequest,
     AppConversationTrigger,
 )
+from openhands.app_server.automation.callback_processors import (
+    AutomationEventCallbackProcessor,
+)
 from openhands.app_server.utils.logger import openhands_logger as logger
 
 from .correlation import build_log_context
@@ -38,7 +41,9 @@ class OpenHandsClient:
         """Create a new OpenHands conversation for an automation task.
 
         Uses the OSS AppConversationService to start a conversation with
-        AUTOMATION trigger type.
+        AUTOMATION trigger type. Registers an AutomationEventCallbackProcessor
+        to update the execution record when the conversation reaches a terminal
+        state.
 
         Returns:
             Conversation ID string, or None if creation failed.
@@ -55,6 +60,9 @@ class OpenHandsClient:
                     )
                 ],
             ),
+            processors=[
+                AutomationEventCallbackProcessor(),
+            ],
         )
 
         async with get_app_conversation_service(state, request) as service:

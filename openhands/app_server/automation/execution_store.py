@@ -89,6 +89,19 @@ class ExecutionStore:
             )
             return self._record_from_model(execution)
 
+    async def get_execution_by_conversation_id(
+        self, conversation_id: str
+    ) -> ExecutionRecord | None:
+        """Get an execution record by conversation_id."""
+        async with self._get_session() as session:
+            result = await session.execute(
+                select(StoredExecution).filter(
+                    StoredExecution.conversation_id == conversation_id
+                )
+            )
+            execution = result.scalars().first()
+            return self._record_from_model(execution) if execution else None
+
     async def update_state(
         self,
         execution_id: str,

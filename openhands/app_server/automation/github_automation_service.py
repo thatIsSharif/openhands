@@ -120,11 +120,15 @@ class GitHubAutomationService:
         payload: dict,
         state,
         request=None,
+        delivery_id: str | None = None,
     ) -> dict:
         """Process a pull_request_review_comment webhook event.
 
         Creates a NEW OpenHands conversation for each review cycle.
         Never reuses old conversations.
+
+        Idempotency is provided via the X-GitHub-Delivery header
+        which is passed as the source_event_id.
 
         Returns a dict for the webhook response.
         """
@@ -156,10 +160,12 @@ class GitHubAutomationService:
             ),
         )
 
-        # Create execution record (no source_event_id for GitHub yet;
-        # idempotency can be added via X-GitHub-Delivery header)
+        # Use X-GitHub-Delivery as source_event_id for idempotency
+        event_id = compute_github_event_id(payload, delivery_id)
+
         execution_record, is_new = await self.execution_service.create_execution(
             source_type=SourceType.GITHUB,
+            source_event_id=event_id,
             jira_issue_key=None,
             github_pr_id=pr_number,
             repository=repository,

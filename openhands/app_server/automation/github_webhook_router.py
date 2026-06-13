@@ -78,9 +78,9 @@ async def handle_github_webhook(
                 status='rejected', reason='Invalid signature'
             )
 
-    # Schedule background processing
+    # Schedule background processing with delivery_id for idempotency
     background_tasks.add_task(
-        _process_github_review_comment, payload, request
+        _process_github_review_comment, payload, delivery_id, request
     )
 
     return GitHubWebhookResponse(status='accepted')
@@ -88,6 +88,7 @@ async def handle_github_webhook(
 
 async def _process_github_review_comment(
     payload: dict,
+    delivery_id: str,
     request: Request,
 ) -> None:
     """Process a GitHub review comment event in the background.
@@ -120,6 +121,7 @@ async def _process_github_review_comment(
             payload=payload,
             state=request.state,
             request=request,
+            delivery_id=delivery_id,
         )
 
         logger.info(
