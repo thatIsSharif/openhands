@@ -106,6 +106,42 @@ class StoredGitHubPullRequest(Base):
     )
 
 
+class StoredJiraProjectRepository(Base):
+    """Maps a Jira project key to a GitHub repository.
+
+    Also stores an optional custom_field_id that the resolver can check
+    on individual issues for a repository override.
+    """
+
+    __tablename__ = 'jira_project_repositories'
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    jira_project_key: Mapped[str] = mapped_column(
+        String(50), unique=True, nullable=False, index=True
+    )
+    repository: Mapped[str] = mapped_column(String(255), nullable=False)
+    owner: Mapped[str] = mapped_column(String(255), nullable=False)
+    default_branch: Mapped[str] = mapped_column(
+        String(50), nullable=False, server_default=text("'main'")
+    )
+    custom_field_id: Mapped[str | None] = mapped_column(
+        String(50), nullable=True,
+        comment='Jira custom field ID (e.g. customfield_12345) '
+                'that may contain a per-issue repository override',
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        server_default=text('CURRENT_TIMESTAMP'),
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        server_default=text('CURRENT_TIMESTAMP'),
+        onupdate=text('CURRENT_TIMESTAMP'),
+        nullable=False,
+    )
+
+
 class StoredReviewIteration(Base):
     __tablename__ = 'review_iterations'
 

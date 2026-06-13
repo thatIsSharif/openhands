@@ -7,6 +7,7 @@ Adds tables for the Jira & GitHub webhook driven automation platform:
 - jira_issues: Jira issue metadata
 - github_pull_requests: GitHub pull request tracking
 - review_iterations: PR review cycle tracking
+- jira_project_repositories: Jira project → GitHub repository mapping
 """
 
 from __future__ import annotations
@@ -227,14 +228,64 @@ def _create_review_iterations_table() -> None:
     )
 
 
+def _create_jira_project_repositories_table() -> None:
+    op.create_table(
+        'jira_project_repositories',
+        sa.Column('id', sa.Integer(), autoincrement=True, nullable=False),
+        sa.Column(
+            'jira_project_key',
+            sa.String(length=50),
+            nullable=False,
+        ),
+        sa.Column(
+            'repository',
+            sa.String(length=255),
+            nullable=False,
+        ),
+        sa.Column('owner', sa.String(length=255), nullable=False),
+        sa.Column(
+            'default_branch',
+            sa.String(length=50),
+            nullable=False,
+            server_default='main',
+        ),
+        sa.Column(
+            'custom_field_id',
+            sa.String(length=50),
+            nullable=True,
+        ),
+        sa.Column(
+            'created_at',
+            sa.DateTime(),
+            server_default=sa.func.current_timestamp(),
+            nullable=False,
+        ),
+        sa.Column(
+            'updated_at',
+            sa.DateTime(),
+            server_default=sa.func.current_timestamp(),
+            nullable=False,
+        ),
+        sa.PrimaryKeyConstraint('id'),
+    )
+    op.create_index(
+        'ix_jira_project_repositories_project_key',
+        'jira_project_repositories',
+        ['jira_project_key'],
+        unique=True,
+    )
+
+
 def upgrade() -> None:
     _create_executions_table()
     _create_jira_issues_table()
     _create_github_pull_requests_table()
     _create_review_iterations_table()
+    _create_jira_project_repositories_table()
 
 
 def downgrade() -> None:
+    op.drop_table('jira_project_repositories')
     op.drop_table('review_iterations')
     op.drop_table('github_pull_requests')
     op.drop_table('jira_issues')

@@ -76,13 +76,25 @@
 | No new dependencies added to pyproject.toml | ✅ Langfuse is optional, installed manually |
 | All code lives outside enterprise/ | ✅ Package at `openhands/app_server/automation/` |
 
+### 1.8 Repository Resolution
+| Requirement | Status | File(s) |
+|------------|--------|---------|
+| Jira project → repository DB mapping table | ✅ Done | `models.py:StoredJiraProjectRepository` |
+| Migration for jira_project_repositories table | ✅ Done | `011_add_automation_tables.py` |
+| Cascading resolver (custom field → mapping → fail) | ✅ Done | `repository_resolver.py:JiraProjectRepositoryResolver` |
+| Custom field extraction from Jira payload | ✅ Done | `repository_resolver.py:_extract_custom_field()` |
+| Extract project key from Jira webhook | ✅ Done | `jira_automation_service.py:extract_jira_project_key()` |
+| Admin CRUD API for mappings | ✅ Done | `admin_router.py` |
+| No silent defaults (fails with clear error) | ✅ Done | `RepositoryNotResolvedError` |
+| Future multi-repo support designed | ✅ Done | `labels_filter` approach documented in design.md |
+
 ---
 
 ## 2. Database Migration
 
 ### 2.1 New Tables
 
-Four new tables are created by migration `011`:
+Five new tables are created by migration `011`:
 
 **executions** — Canonical execution lifecycle record
 | Column | Type | Notes |
@@ -130,6 +142,18 @@ Four new tables are created by migration `011`:
 | state | VARCHAR(20) | `open`, `closed`, `merged` |
 | execution_id | INTEGER | FK to executions |
 | pr_url | TEXT | Full GitHub URL |
+| created_at / updated_at | DATETIME | Auto |
+
+
+**jira_project_repositories** — Jira project → GitHub repository mapping
+| Column | Type | Notes |
+|--------|------|-------|
+| id | INTEGER | Primary key (auto) |
+| jira_project_key | VARCHAR(50) | **UNIQUE** — e.g., `KAN` |
+| repository | VARCHAR(255) | GitHub full name: `owner/repo` |
+| owner | VARCHAR(255) | GitHub owner: `thatIsSharif` |
+| default_branch | VARCHAR(50) | Base branch: `main` (default) |
+| custom_field_id | VARCHAR(50) | Optional Jira custom field ID for per-issue repo override |
 | created_at / updated_at | DATETIME | Auto |
 
 **review_iterations** — Review cycle tracking
@@ -191,6 +215,10 @@ alembic downgrade 010
 |--------|------|-------------|
 | POST | `/api/v1/webhooks/jira` | Jira issue webhook receiver |
 | POST | `/api/v1/webhooks/github` | GitHub PR review comment webhook receiver |
+| POST | `/api/v1/admin/jira-project-repos` | Create/update Jira project→repo mapping |
+| GET | `/api/v1/admin/jira-project-repos` | List all mappings |
+| GET | `/api/v1/admin/jira-project-repos/{project_key}` | Get single mapping |
+| DELETE | `/api/v1/admin/jira-project-repos/{project_key}` | Delete mapping |
 
 ### 3.3 Dependencies
 | Package | Required? | Notes |
@@ -317,6 +345,21 @@ print('All automation module imports OK!')
 
 ### 5.2 Jira Webhook Test
 ```bash
+# First, create a project mapping (required for Jira to resolve the repo)
+curl -X POST http://localhost:3000/api/v1/admin/jira-project-repos \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jira_project_key": "KAN",
+    "repository": "thatIsSharif/openhands",
+    "owner": "thatIsSharif",
+    "default_branch": "main"
+  }'
+# Expected: {"id": 1, "jira_project_key": "KAN", ...}
+
+# Verify the mapping was created
+curl http://localhost:3000/api/v1/admin/jira-project-repos
+# Expected: {"items": [{"jira_project_key": "KAN", ...}]}
+
 # Simulate a Jira webhook event
 curl -X POST http://localhost:3000/api/v1/webhooks/jira \
   -H "Content-Type: application/json" \
@@ -330,7 +373,8 @@ curl -X POST http://localhost:3000/api/v1/webhooks/jira \
         "issuetype": {"name": "Story"},
         "priority": {"name": "Medium"},
         "reporter": {"displayName": "TestUser"},
-        "labels": ["test"]
+        "labels": ["test"],
+        "project": {"key": "KAN"}
       }
     },
     "timestamp": 1234567890
@@ -450,24 +494,27 @@ grep "execution_id" /var/log/openhands/app.log | tail -5
 ```
 automation/
 ├── __init__.py                      # Package init
-├── callback_processors.py           # AutomationEventCallbackProcessor (EventCallbackProcessor subclass)
+├── admin_router.py                  # Admin CRUD for Jira project→repo mappings
+├── callback_processors.py           # AutomationEventCallbackProcessor
 ├── correlation.py                   # Execution ID generation, log context builder
 ├── execution_models.py              # ExecutionState enum, SourceType enum, validate_transition()
 ├── execution_service.py             # Business logic with idempotency + Langfuse hooks
 ├── execution_store.py               # SQLAlchemy CRUD operations (session-per-operation)
 ├── github_automation_service.py     # GitHub webhook processing service
 ├── github_webhook_router.py         # POST /api/v1/webhooks/github
-├── jira_automation_service.py       # Jira webhook processing service
+├── jira_automation_service.py       # Jira webhook processing + repo resolution
 ├── jira_webhook_router.py           # POST /api/v1/webhooks/jira
 ├── langfuse_service.py              # Optional Langfuse tracing (no-op when not configured)
 ├── models.py                        # SQLAlchemy ORM models (StoredExecution, etc.)
-└── openhands_client.py              # AppConversationService wrapper
+├── openhands_client.py              # AppConversationService wrapper
+└── repository_resolver.py           # JiraProjectRepositoryResolver
+
 ```
 
 ### New Files (database migration)
 ```
 openhands/app_server/app_lifespan/alembic/versions/
-└── 011_add_automation_tables.py     # Add executions, jira_issues, github_pull_requests, review_iterations
+└── 011_add_automation_tables.py     # Add executions, jira_issues, github_pull_requests, review_iterations, jira_project_repositories
 ```
 
 ### Modified Files
@@ -483,6 +530,8 @@ tests/unit/test_automation/
 ├── test_execution_models.py
 ├── test_execution_service.py
 ├── test_github_automation.py
+- test_repository_resolver.py
+- test_repository_resolver.py
 └── test_jira_automation.py
 ```
 

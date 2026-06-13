@@ -105,15 +105,20 @@ async def _process_jira_event(
     from openhands.app_server.automation.openhands_client import (
         OpenHandsClient,
     )
+    from openhands.app_server.automation.repository_resolver import (
+        JiraProjectRepositoryResolver,
+    )
 
     try:
         # Build services using OSS DI
         store = ExecutionStore()
         execution_service = ExecutionService(store=store)
         openhands_client = OpenHandsClient()
+        repo_resolver = JiraProjectRepositoryResolver(store=store)
         jira_service = JiraAutomationService(
             execution_service=execution_service,
             openhands_client=openhands_client,
+            repo_resolver=repo_resolver,
         )
 
         result = await jira_service.process_issue_created(

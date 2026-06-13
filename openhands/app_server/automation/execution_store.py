@@ -20,6 +20,7 @@ from .execution_models import (
     ExecutionState,
     GitHubPullRequestRecord,
     JiraIssueRecord,
+    JiraProjectRepositoryRecord,
     ReviewIterationRecord,
     SourceType,
 )
@@ -27,6 +28,7 @@ from .models import (
     StoredExecution,
     StoredGitHubPullRequest,
     StoredJiraIssue,
+    StoredJiraProjectRepository,
     StoredReviewIteration,
 )
 
@@ -355,6 +357,94 @@ class ExecutionStore:
             await session.refresh(pr)
             return self._github_pr_record_from_model(pr)
 
+    # --- Jira Project Repository operations ---
+
+    async def upsert_jira_project_repository(
+        self,
+        jira_project_key: str,
+        repository: str,
+        owner: str,
+        default_branch: str = 'main',
+        custom_field_id: str | None = None,
+    ) -> JiraProjectRepositoryRecord:
+        """Create or update a Jira project → repository mapping."""
+        async with self._get_session() as session:
+            result = await session.execute(
+                select(StoredJiraProjectRepository).filter(
+                    StoredJiraProjectRepository.jira_project_key == jira_project_key
+                )
+            )
+            mapping = result.scalars().first()
+
+            if mapping:
+                mapping.repository = repository
+                mapping.owner = owner
+                mapping.default_branch = default_branch
+                if custom_field_id is not None:
+                    mapping.custom_field_id = custom_field_id
+            else:
+                mapping = StoredJiraProjectRepository(
+                    jira_project_key=jira_project_key,
+                    repository=repository,
+                    owner=owner,
+                    default_branch=default_branch,
+                    custom_field_id=custom_field_id,
+                )
+                session.add(mapping)
+
+            await session.commit()
+            await session.refresh(mapping)
+            return self._project_repo_record_from_model(mapping)
+
+    async def get_jira_project_repository(
+        self, jira_project_key: str
+    ) -> JiraProjectRepositoryRecord | None:
+        """Get a project→repository mapping by Jira project key."""
+        async with self._get_session() as session:
+            result = await session.execute(
+                select(StoredJiraProjectRepository).filter(
+                    StoredJiraProjectRepository.jira_project_key == jira_project_key
+                )
+            )
+            mapping = result.scalars().first()
+            return (
+                self._project_repo_record_from_model(mapping)
+                if mapping
+                else None
+            )
+
+    async def list_jira_project_repositories(
+        self,
+    ) -> list[JiraProjectRepositoryRecord]:
+        """List all Jira project → repository mappings."""
+        async with self._get_session() as session:
+            result = await session.execute(
+                select(StoredJiraProjectRepository).order_by(
+                    StoredJiraProjectRepository.jira_project_key
+                )
+            )
+            mappings = result.scalars().all()
+            return [
+                self._project_repo_record_from_model(m) for m in mappings
+            ]
+
+    async def delete_jira_project_repository(
+        self, jira_project_key: str
+    ) -> bool:
+        """Delete a project→repository mapping. Returns True if deleted."""
+        async with self._get_session() as session:
+            result = await session.execute(
+                select(StoredJiraProjectRepository).filter(
+                    StoredJiraProjectRepository.jira_project_key == jira_project_key
+                )
+            )
+            mapping = result.scalars().first()
+            if not mapping:
+                return False
+            await session.delete(mapping)
+            await session.commit()
+            return True
+
     # --- Review Iteration operations ---
 
     async def create_review_iteration(
@@ -476,6 +566,21 @@ class ExecutionStore:
             pr_url=pr.pr_url,
             created_at=pr.created_at,
             updated_at=pr.updated_at,
+        )
+
+    @staticmethod
+    def _project_repo_record_from_model(
+        mapping: StoredJiraProjectRepository,
+    ) -> JiraProjectRepositoryRecord:
+        return JiraProjectRepositoryRecord(
+            id=mapping.id,
+            jira_project_key=mapping.jira_project_key,
+            repository=mapping.repository,
+            owner=mapping.owner,
+            default_branch=mapping.default_branch,
+            custom_field_id=mapping.custom_field_id,
+            created_at=mapping.created_at,
+            updated_at=mapping.updated_at,
         )
 
     @staticmethod

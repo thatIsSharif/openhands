@@ -1263,3 +1263,62 @@ enterprise/
             ├── test_execution_store.py
             └── test_webhook_routers.py
 ```
+
+---
+
+## 13. Repository Resolution Design
+
+### 13.1 Problem
+
+Jira webhook payloads contain a **project key** (e.g., `"KAN"`) but **never** contain a GitHub repository identifier. The automation platform needs to know which repository to clone, branch, and create PRs against.
+
+### 13.2 Resolution Strategy (Cascading)
+
+The `JiraProjectRepositoryResolver` resolves the target GitHub repository using a cascading lookup:
+
+```
+1. Jira Custom Field (per-issue override)
+   ↓ (if not present or invalid format)
+2. Project → Repository Mapping Table (DB-backed)
+   ↓ (if no mapping exists)
+3. ❌ Fail with RepositoryNotResolvedError
+```
+
+**No silent defaults.** If no mapping can be found, the webhook response returns a clear error.
+
+### 13.3 Layer 1: Jira Custom Field (Issue-Level Override)
+
+Each project mapping can optionally specify a `custom_field_id` (e.g., `customfield_12345`). When configured:
+
+1. The resolver checks if the Jira issue's `fields` dict contains that custom field key
+2. If present and in `"owner/repo-name"` format, it's used as the target repository
+3. Supports string values, `{"value": "..."}` objects, and `{"name": "..."}` objects
+
+### 13.4 Layer 2: Database Mapping Table
+
+Table: `jira_project_repositories`
+
+| Column | Type | Description | Example |
+|--------|------|-------------|---------|
+| `jira_project_key` | VARCHAR(50) UNIQUE | Jira project identifier | `KAN` |
+| `repository` | VARCHAR(255) | GitHub repo full name | `thatIsSharif/openhands` |
+| `owner` | VARCHAR(255) | Repository owner | `thatIsSharif` |
+| `default_branch` | VARCHAR(50) | Branch to base PRs on | `main` |
+| `custom_field_id` | VARCHAR(50) NULL | Jira custom field ID | `customfield_12345` |
+
+### 13.5 Layer 3: Fail with Clear Error
+
+When no mapping exists, the resolver raises `RepositoryNotResolvedError` and the webhook returns `{"status": "failed", "error": "No repository mapping for Jira project ..."}`.
+
+### 13.6 Admin API
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/api/v1/admin/jira-project-repos` | Create/update mapping |
+| GET | `/api/v1/admin/jira-project-repos` | List all mappings |
+| GET | `/api/v1/admin/jira-project-repos/{project_key}` | Get single mapping |
+| DELETE | `/api/v1/admin/jira-project-repos/{project_key}` | Delete mapping |
+
+### 13.7 Future Multi-Repository
+
+Current schema: one repo per Jira project. For future multi-repo support, add a `labels_filter TEXT[]` column and allow multiple rows per project key. The resolver would match based on issue labels.

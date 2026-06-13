@@ -5,6 +5,7 @@ Handles:
 - Event ID computation for idempotency
 - Issue data extraction
 - Branch name generation
+- Repository resolution (Jira project → GitHub repo mapping)
 - Execution and conversation creation
 """
 
@@ -21,7 +22,12 @@ from openhands.app_server.utils.logger import openhands_logger as logger
 from .correlation import build_log_context
 from .execution_models import SourceType
 from .execution_service import ExecutionService
+from .execution_store import ExecutionStore
 from .openhands_client import OpenHandsClient
+from .repository_resolver import (
+    JiraProjectRepositoryResolver,
+    RepositoryNotResolvedError,
+)
 
 JIRA_WEBHOOK_EVENTS = frozenset({'jira:issue_created', 'jira:issue_updated'})
 
@@ -67,7 +73,8 @@ def extract_jira_issue_data(
     """Extract issue metadata from a Jira webhook payload.
 
     Returns dict with keys: issue_key, summary, description, issue_type,
-    priority, reporter, labels. Returns None if issue_key is missing.
+    priority, reporter, labels, project_key.
+    Returns None if issue_key is missing.
     """
     issue = payload.get('issue', {})
     issue_key = issue.get('key')
@@ -75,6 +82,7 @@ def extract_jira_issue_data(
         return None
 
     fields = issue.get('fields', {})
+    project = fields.get('project', {}) or {}
 
     return {
         'issue_key': issue_key,
@@ -86,7 +94,21 @@ def extract_jira_issue_data(
             (fields.get('reporter', {}) or {}).get('displayName', '')
         ),
         'labels': fields.get('labels') or [],
+        'project_key': project.get('key', ''),
     }
+
+
+def extract_jira_project_key(payload: dict) -> str | None:
+    """Extract the Jira project key from a webhook payload.
+
+    The project key is nested in issue.fields.project.key.
+    """
+    return (
+        payload.get('issue', {})
+        .get('fields', {})
+        .get('project', {})
+        .get('key')
+    )
 
 
 def generate_jira_branch_name(
@@ -128,13 +150,15 @@ class JiraAutomationService:
     1. Verify webhook signature
     2. Compute event ID for idempotency
     3. Extract issue data
-    4. Create execution record
-    5. Generate branch name
-    6. Create OpenHands conversation
+    4. Resolve target repository (custom field → project mapping → fail)
+    5. Create execution record
+    6. Generate branch name
+    7. Create OpenHands conversation
     """
 
     execution_service: ExecutionService
     openhands_client: OpenHandsClient
+    repo_resolver: JiraProjectRepositoryResolver | None = None
 
     async def process_issue_created(
         self,
@@ -157,6 +181,60 @@ class JiraAutomationService:
 
         issue_key = issue_data['issue_key']
         summary = issue_data['summary']
+        project_key = issue_data['project_key']
+
+        # Resolve target repository
+        repository_str: str | None = None
+        owner: str | None = None
+        default_branch: str | None = None
+
+        if project_key:
+            resolver = self.repo_resolver or JiraProjectRepositoryResolver(
+                store=self.execution_service.store
+            )
+            try:
+                resolved = await resolver.resolve(
+                    jira_project_key=project_key,
+                    issue_payload=payload,
+                )
+                repository_str = resolved.repository
+                owner = resolved.owner
+                default_branch = resolved.default_branch
+                logger.info(
+                    f'[Automation] Resolved repository for {project_key}: '
+                    f'{repository_str} (via {resolved.resolved_by})',
+                    extra=build_log_context(
+                        execution_id='',
+                        jira_issue_key=issue_key,
+                        repository=repository_str,
+                    ),
+                )
+            except RepositoryNotResolvedError as e:
+                logger.error(
+                    f'[Automation] Repository resolution failed: {e}',
+                    extra=build_log_context(
+                        execution_id='',
+                        jira_issue_key=issue_key,
+                    ),
+                )
+                return {
+                    'status': 'failed',
+                    'issue_key': issue_key,
+                    'error': str(e),
+                }
+        else:
+            logger.error(
+                '[Automation] Jira webhook: no project key in payload',
+                extra=build_log_context(
+                    execution_id='',
+                    jira_issue_key=issue_key,
+                ),
+            )
+            return {
+                'status': 'failed',
+                'issue_key': issue_key,
+                'error': 'No Jira project key in webhook payload',
+            }
 
         # Idempotency: compute event ID
         event_id = compute_jira_event_id(payload)
@@ -166,12 +244,13 @@ class JiraAutomationService:
             issue_key, issue_data['issue_type'], summary
         )
 
-        # Create execution record
+        # Create execution record with repository info
         execution_record, is_new = await self.execution_service.create_execution(
             source_type=SourceType.JIRA,
             source_event_id=event_id,
             jira_issue_key=issue_key,
             branch=branch,
+            repository=repository_str,
         )
 
         # Skip if duplicate
@@ -189,7 +268,7 @@ class JiraAutomationService:
             execution_id, 'QUEUED'  # type: ignore[arg-type]
         )
 
-        # Build prompt from template
+        # Build prompt from template with full context
         prompt = (
             f'You are working on Jira issue {issue_key}. '
             f'Title: {summary}\n\n'
@@ -197,8 +276,12 @@ class JiraAutomationService:
             f'Issue Type: {issue_data["issue_type"]}\n'
             f'Priority: {issue_data["priority"]}\n'
             f'Reporter: {issue_data["reporter"]}\n\n'
-            f'Please create a branch named "{branch}" and implement '
-            f'the required changes. Create a pull request when done.'
+            f'Target repository: {repository_str}\n'
+            f'Default branch: {default_branch or "main"}\n\n'
+            f'Please create a branch named "{branch}" from '
+            f'{default_branch or "main"} and implement '
+            f'the required changes. Create a pull request against '
+            f'{default_branch or "main"} when done.'
         )
 
         # Create OpenHands conversation
@@ -209,7 +292,7 @@ class JiraAutomationService:
             title=f'[Automation] Jira {issue_key}',
             execution_id=execution_id,
             jira_issue_key=issue_key,
-            repository=None,
+            repository=repository_str,
         )
 
         if conversation_id:
@@ -224,6 +307,7 @@ class JiraAutomationService:
                 'execution_id': execution_id,
                 'conversation_id': conversation_id,
                 'issue_key': issue_key,
+                'repository': repository_str,
             }
         else:
             await self.execution_service.transition_state(

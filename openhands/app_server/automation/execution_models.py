@@ -110,6 +110,20 @@ class ReviewIterationRecord:
     created_at: datetime | None = None
 
 
+@dataclass
+class JiraProjectRepositoryRecord:
+    """Maps a Jira project key to a GitHub repository."""
+
+    id: int | None = None
+    jira_project_key: str = ''
+    repository: str = ''
+    owner: str = ''
+    default_branch: str = 'main'
+    custom_field_id: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
 def validate_transition(current: ExecutionState, target: ExecutionState) -> None:
     """Validate that a state transition is legal.
 

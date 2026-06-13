@@ -7,6 +7,7 @@ import json
 from openhands.app_server.automation.jira_automation_service import (
     compute_jira_event_id,
     extract_jira_issue_data,
+    extract_jira_project_key,
     generate_jira_branch_name,
     verify_jira_signature,
 )
@@ -93,6 +94,7 @@ class TestExtractJiraIssueData:
                     'priority': {'name': 'Medium'},
                     'reporter': {'displayName': 'User1'},
                     'labels': ['automation'],
+                    'project': {'key': 'KAN'},
                 },
             }
         }
@@ -105,6 +107,7 @@ class TestExtractJiraIssueData:
         assert data['priority'] == 'Medium'
         assert data['reporter'] == 'User1'
         assert data['labels'] == ['automation']
+        assert data['project_key'] == 'KAN'
 
     def test_missing_issue_key(self):
         payload = {'issue': {'fields': {}}}
@@ -167,3 +170,22 @@ class TestGenerateJiraBranchName:
         assert all(
             c.isalnum() or c in '-/' for c in branch
         ), f'Branch has invalid chars: {branch}'
+
+
+class TestExtractJiraProjectKey:
+    def test_extracts_from_full_payload(self):
+        payload = {
+            'issue': {
+                'fields': {
+                    'project': {'key': 'KAN'},
+                },
+            },
+        }
+        assert extract_jira_project_key(payload) == 'KAN'
+
+    def test_returns_none_when_missing(self):
+        assert extract_jira_project_key({}) is None
+        assert extract_jira_project_key({'issue': {}}) is None
+        assert extract_jira_project_key(
+            {'issue': {'fields': {}}}
+        ) is None

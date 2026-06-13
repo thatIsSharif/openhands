@@ -1,6 +1,9 @@
 from fastapi import APIRouter
 
 from openhands.app_server.app_conversation import app_conversation_router
+from openhands.app_server.automation.admin_router import (
+    router as admin_router,
+)
 from openhands.app_server.automation.github_webhook_router import (
     router as github_webhook_router,
 )
@@ -43,3 +46,4 @@ router.include_router(git_router)
 router.include_router(config_router)
 router.include_router(jira_webhook_router)
 router.include_router(github_webhook_router)
+router.include_router(admin_router)
