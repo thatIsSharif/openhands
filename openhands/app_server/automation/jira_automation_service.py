@@ -17,6 +17,7 @@ import json
 import re
 from dataclasses import dataclass
 
+from openhands.app_server.integrations.provider import ProviderType
 from openhands.app_server.utils.logger import openhands_logger as logger
 
 from .correlation import build_log_context
@@ -284,7 +285,7 @@ class JiraAutomationService:
             f'{default_branch or "main"} when done.'
         )
 
-        # Create OpenHands conversation
+        # Create OpenHands conversation with repository attached
         conversation_id = await self.openhands_client.create_conversation(
             state=state,
             request=request,
@@ -293,6 +294,9 @@ class JiraAutomationService:
             execution_id=execution_id,
             jira_issue_key=issue_key,
             repository=repository_str,
+            selected_repository=repository_str,
+            selected_branch=branch,
+            git_provider=ProviderType.GITHUB,
         )
 
         if conversation_id:

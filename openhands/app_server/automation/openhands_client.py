@@ -18,6 +18,7 @@ from openhands.app_server.app_conversation.app_conversation_models import (
 from openhands.app_server.automation.callback_processors import (
     AutomationEventCallbackProcessor,
 )
+from openhands.app_server.integrations.provider import ProviderType
 from openhands.app_server.utils.logger import openhands_logger as logger
 
 from .correlation import build_log_context
@@ -37,6 +38,9 @@ class OpenHandsClient:
         jira_issue_key: str | None = None,
         pr_number: int | None = None,
         repository: str | None = None,
+        selected_repository: str | None = None,
+        selected_branch: str | None = None,
+        git_provider: ProviderType | None = None,
     ) -> str | None:
         """Create a new OpenHands conversation for an automation task.
 
@@ -44,6 +48,19 @@ class OpenHandsClient:
         AUTOMATION trigger type. Registers an AutomationEventCallbackProcessor
         to update the execution record when the conversation reaches a terminal
         state.
+
+        Args:
+            state: The injector state.
+            request: The FastAPI request object.
+            prompt: The initial prompt for the agent.
+            title: The conversation title.
+            execution_id: The execution correlation ID.
+            jira_issue_key: The Jira issue key, if applicable.
+            pr_number: The PR number, if applicable.
+            repository: The repository name (for logging).
+            selected_repository: The repository to clone (owner/repo).
+            selected_branch: The branch to check out.
+            git_provider: The Git provider (e.g., ProviderType.GITHUB).
 
         Returns:
             Conversation ID string, or None if creation failed.
@@ -60,6 +77,9 @@ class OpenHandsClient:
                     )
                 ],
             ),
+            selected_repository=selected_repository,
+            selected_branch=selected_branch,
+            git_provider=git_provider,
             processors=[
                 AutomationEventCallbackProcessor(),
             ],

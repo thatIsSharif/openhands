@@ -1,9 +1,9 @@
-"""GitHub automation service - processes PR review comment webhooks.
+"""GitHub automation service - processes PR review webhooks.
 
 Handles:
 - Webhook signature verification (HMAC-SHA256)
 - Event ID computation for idempotency
-- PR review comment data extraction
+- PR review data extraction (review comments and submitted reviews)
 - Execution and conversation creation (NEW conversation per review)
 """
 
@@ -14,6 +14,7 @@ import hmac
 import json
 from dataclasses import dataclass
 
+from openhands.app_server.integrations.provider import ProviderType
 from openhands.app_server.utils.logger import openhands_logger as logger
 
 from .correlation import build_log_context
@@ -48,13 +49,21 @@ def verify_github_signature(
     return hmac.compare_digest(received, expected)
 
 
-def compute_github_event_id(payload: dict, delivery_id: str | None) -> str:
+def compute_github_event_id(
+    payload: dict,
+    delivery_id: str | None,
+    event_type: str = 'pull_request_review_comment',
+) -> str:
     """Compute a deterministic event ID for idempotency.
 
-    Combines the delivery ID with the comment ID.
+    Uses the delivery ID combined with the relevant object ID
+    (comment ID for review comments, review ID for submitted reviews).
     """
-    comment_id = payload.get('comment', {}).get('id', '')
-    raw = f'{delivery_id or ""}:{comment_id}'
+    if event_type == 'pull_request_review':
+        obj_id = payload.get('review', {}).get('id', '')
+    else:
+        obj_id = payload.get('comment', {}).get('id', '')
+    raw = f'{delivery_id or ""}:{obj_id}'
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
@@ -99,17 +108,68 @@ def extract_github_review_data(
     }
 
 
+def extract_github_review_submitted_data(
+    payload: dict,
+) -> dict | None:
+    """Extract PR review data from a pull_request_review webhook payload.
+
+    The pull_request_review payload has a different structure from
+    pull_request_review_comment — the review object is at the top level
+    instead of comment, and includes a review state (approved, changes_requested,
+    comment) and an action field (submitted, edited, dismissed).
+
+    Returns dict with keys: repository, owner, pr_number, branch,
+    pr_title, pr_body, review_comment, reviewer, review_id, review_state.
+
+    Returns None if required fields are missing or action is not 'submitted'.
+    """
+    action = payload.get('action', '')
+    if action != 'submitted':
+        return None
+
+    repo_data = payload.get('repository', {})
+    pr_data = payload.get('pull_request', {})
+    review_data = payload.get('review', {}) or {}
+    sender_data = payload.get('sender', {})
+
+    full_name = repo_data.get('full_name', '')
+    owner = (repo_data.get('owner', {}) or {}).get('login', '')
+    pr_number = pr_data.get('number')
+    branch = (pr_data.get('head', {}) or {}).get('ref', '')
+    pr_title = pr_data.get('title', '')
+    pr_body = pr_data.get('body') or ''
+    review_comment = review_data.get('body', '') or ''
+    reviewer = sender_data.get('login', '')
+    review_id = review_data.get('id')
+    review_state = review_data.get('state', '')
+
+    if not full_name or not pr_number:
+        return None
+
+    return {
+        'repository': full_name,
+        'owner': owner,
+        'pr_number': pr_number,
+        'branch': branch,
+        'pr_title': pr_title,
+        'pr_body': pr_body,
+        'review_comment': review_comment,
+        'reviewer': reviewer,
+        'review_id': review_id,
+        'review_state': review_state,
+    }
+
+
 @dataclass
 class GitHubAutomationService:
-    """Processes GitHub PR review comment webhook events.
+    """Processes GitHub PR review webhook events.
 
     Flow:
     1. Verify webhook signature
     2. Compute event ID for idempotency
     3. Extract PR review data
     4. Create execution record (NEW conversation per review)
-    5. Fetch PR context (details, diff, unresolved comments)
-    6. Create NEW OpenHands conversation
+    5. Create NEW OpenHands conversation with repository attached
     """
 
     execution_service: ExecutionService
@@ -161,7 +221,9 @@ class GitHubAutomationService:
         )
 
         # Use X-GitHub-Delivery as source_event_id for idempotency
-        event_id = compute_github_event_id(payload, delivery_id)
+        event_id = compute_github_event_id(
+            payload, delivery_id, event_type='pull_request_review_comment'
+        )
 
         execution_record, is_new = await self.execution_service.create_execution(
             source_type=SourceType.GITHUB,
@@ -201,7 +263,7 @@ class GitHubAutomationService:
             f'existing branch and PR.'
         )
 
-        # Create NEW OpenHands conversation (never reuse old ones)
+        # Create NEW OpenHands conversation with repository attached
         conversation_id = await self.openhands_client.create_conversation(
             state=state,
             request=request,
@@ -210,6 +272,146 @@ class GitHubAutomationService:
             execution_id=execution_id,
             pr_number=pr_number,
             repository=repository,
+            selected_repository=repository,
+            selected_branch=branch,
+            git_provider=ProviderType.GITHUB,
+        )
+
+        if conversation_id:
+            await self.execution_service.transition_state(
+                execution_id,
+                'RUNNING',  # type: ignore[arg-type]
+                conversation_id=conversation_id,
+            )
+            return {
+                'status': 'running',
+                'execution_id': execution_id,
+                'conversation_id': conversation_id,
+                'pr_number': pr_number,
+                'repository': repository,
+            }
+        else:
+            await self.execution_service.transition_state(
+                execution_id,
+                'FAILED',  # type: ignore[arg-type]
+                error_message='Failed to create OpenHands conversation',
+            )
+            return {
+                'status': 'failed',
+                'execution_id': execution_id,
+                'pr_number': pr_number,
+                'error': 'Failed to create conversation',
+            }
+
+    async def process_review_submitted(
+        self,
+        payload: dict,
+        state,
+        request=None,
+        delivery_id: str | None = None,
+    ) -> dict:
+        """Process a pull_request_review (submitted) webhook event.
+
+        Creates a NEW OpenHands conversation when a full review
+        is submitted (approved, changes_requested, or comment).
+        Never reuses old conversations.
+
+        Idempotency is provided via the X-GitHub-Delivery header
+        which is passed as the source_event_id.
+
+        Returns a dict for the webhook response.
+        """
+        # Extract PR review submitted data
+        review_data = extract_github_review_submitted_data(payload)
+        if not review_data:
+            logger.warning(
+                '[Automation] GitHub pull_request_review: missing '
+                'required fields or action is not submitted'
+            )
+            return {
+                'status': 'skipped',
+                'reason': 'Missing required fields or action is not submitted',
+            }
+
+        repository = review_data['repository']
+        pr_number = review_data['pr_number']
+        branch = review_data['branch']
+        review_comment = review_data['review_comment']
+        reviewer = review_data['reviewer']
+        review_state = review_data['review_state']
+
+        logger.info(
+            f'[Automation] Processing review ({review_state}) on '
+            f'{repository} PR #{pr_number} by {reviewer}',
+            extra=build_log_context(
+                execution_id='',
+                repository=repository,
+                branch=branch,
+                pr_number=pr_number,
+            ),
+        )
+
+        # Use X-GitHub-Delivery as source_event_id for idempotency
+        event_id = compute_github_event_id(
+            payload, delivery_id, event_type='pull_request_review'
+        )
+
+        execution_record, is_new = await self.execution_service.create_execution(
+            source_type=SourceType.GITHUB,
+            source_event_id=event_id,
+            jira_issue_key=None,
+            github_pr_id=pr_number,
+            repository=repository,
+            branch=branch,
+        )
+
+        if not is_new:
+            return {
+                'status': 'duplicate',
+                'execution_id': execution_record.execution_id,
+            }
+
+        execution_id = execution_record.execution_id
+
+        # Transition to QUEUED
+        await self.execution_service.transition_state(
+            execution_id, 'QUEUED'  # type: ignore[arg-type]
+        )
+
+        # Build prompt for the agent
+        state_desc = {
+            'approved': 'approved',
+            'changes_requested': 'requested changes',
+            'comment': 'left a comment',
+        }.get(review_state, f'({review_state})')
+        prompt = (
+            f'A review was submitted on pull request #{pr_number} '
+            f'in {repository}.\n\n'
+            f'Reviewer: {reviewer}\n'
+            f'Review state: {review_state}\n'
+            f'Review body: {review_comment}\n\n'
+            f'Review branch: {branch}\n\n'
+            f'Please:\n'
+            f'1. Read the PR context and the review feedback\n'
+            f'2. Determine the required fixes\n'
+            f'3. Commit changes to the existing branch ({branch})\n'
+            f'4. Update the existing pull request (#{pr_number})\n\n'
+            f'The PR is the source of truth. Work directly on the '
+            f'existing branch and PR.'
+        )
+
+        # Create NEW OpenHands conversation with repository attached
+        conversation_id = await self.openhands_client.create_conversation(
+            state=state,
+            request=request,
+            prompt=prompt,
+            title=f'[Automation] GitHub PR #{pr_number} {state_desc.title()}',
+            execution_id=execution_id,
+            pr_number=pr_number,
+            repository=repository,
+            selected_repository=repository,
+            selected_branch=branch,
+            git_provider=ProviderType.GITHUB,
         )
 
         if conversation_id:
