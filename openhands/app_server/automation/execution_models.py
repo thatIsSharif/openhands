@@ -122,6 +122,7 @@ class JiraProjectRepositoryRecord:
     custom_field_id: str | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
+    github_webhook_secret: str | None = None
 
 
 def validate_transition(current: ExecutionState, target: ExecutionState) -> None:

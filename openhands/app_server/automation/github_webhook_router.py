@@ -24,14 +24,12 @@ from openhands.app_server.automation.github_automation_service import (
     GitHubAutomationService,
     verify_github_signature,
 )
+from openhands.app_server.automation.repository_resolver import JiraProjectRepositoryResolver
 from openhands.app_server.utils.logger import openhands_logger as logger
 from openhands.app_server.automation.execution_service import (
     ExecutionService,
 )
 from openhands.app_server.automation.execution_store import ExecutionStore
-from openhands.app_server.automation.github_automation_service import (
-    GitHubAutomationService,
-)
 from openhands.app_server.automation.openhands_client import (
     OpenHandsClient,
 )
@@ -90,7 +88,41 @@ async def handle_github_webhook(
             reason=f'Unsupported action: {payload.get("action")}',
         )
 
-    github_secret = os.environ.get('GITHUB_WEBHOOK_SECRET', '')
+    review_state = (
+    payload.get("review", {})
+    .get("state", '')
+    .lower()
+    )
+    logger.info(
+    f'[Automation] Review submitted with state: {review_state}')
+
+    if review_state not in (
+        "approved",
+        "changes_requested",
+    ):
+        return GitHubWebhookResponse(
+            status="ignored",
+            reason=f"Unsupported review state: {review_state}",
+        )
+
+    repo = payload.get("repository", {})
+    owner = repo.get("owner", {}).get("login")
+    repository = repo.get("name")
+
+    store = ExecutionStore()
+    resolver = JiraProjectRepositoryResolver(store)
+
+    mapping = await resolver.get_by_repository(
+        owner=owner,
+        repository=repository,
+    )
+
+    github_secret = (
+        mapping.github_webhook_secret
+        if mapping
+        else None
+    )
+    print(f"GitHub webhook secret for {owner}/{repository}: {github_secret}")
     if github_secret:
         signature = request.headers.get('X-Hub-Signature-256')
 

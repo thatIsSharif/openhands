@@ -135,3 +135,13 @@ class JiraProjectRepositoryResolver:
         if isinstance(value, dict):
             return value.get('value') or value.get('name')
         return str(value) if value else None
+
+    async def get_by_repository(
+        self,
+        owner: str,
+        repository: str,
+    ):
+        return await self.store.get_repository_mapping(
+            owner=owner,
+            repository=repository,
+        )

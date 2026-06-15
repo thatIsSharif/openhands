@@ -140,6 +140,11 @@ class StoredJiraProjectRepository(Base):
         onupdate=text('CURRENT_TIMESTAMP'),
         nullable=False,
     )
+    github_webhook_secret: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
 
 
 class StoredReviewIteration(Base):

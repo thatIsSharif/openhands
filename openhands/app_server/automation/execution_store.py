@@ -370,6 +370,7 @@ class ExecutionStore:
         owner: str,
         default_branch: str = 'main',
         custom_field_id: str | None = None,
+        github_webhook_secret: str | None = None,
     ) -> JiraProjectRepositoryRecord:
         """Create or update a Jira project → repository mapping."""
         async with self._get_session() as session:
@@ -386,6 +387,8 @@ class ExecutionStore:
                 mapping.default_branch = default_branch
                 if custom_field_id is not None:
                     mapping.custom_field_id = custom_field_id
+                if github_webhook_secret is not None:
+                    mapping.github_webhook_secret = github_webhook_secret
             else:
                 mapping = StoredJiraProjectRepository(
                     jira_project_key=jira_project_key,
@@ -393,6 +396,7 @@ class ExecutionStore:
                     owner=owner,
                     default_branch=default_branch,
                     custom_field_id=custom_field_id,
+                    github_webhook_secret=github_webhook_secret,
                 )
                 session.add(mapping)
 
@@ -585,6 +589,7 @@ class ExecutionStore:
             custom_field_id=mapping.custom_field_id,
             created_at=mapping.created_at,
             updated_at=mapping.updated_at,
+            github_webhook_secret=mapping.github_webhook_secret,
         )
 
     @staticmethod
@@ -602,3 +607,27 @@ class ExecutionStore:
             repository=iteration.repository,
             created_at=iteration.created_at,
         )
+
+    async def get_repository_mapping(
+        self,
+        owner: str,
+        repository: str,
+    ) -> JiraProjectRepositoryRecord | None:
+        """Get repository mapping by owner/repository."""
+        async with self._get_session() as session:
+            result = await session.execute(
+                select(StoredJiraProjectRepository).filter(
+                    and_(
+                        StoredJiraProjectRepository.owner == owner,
+                        StoredJiraProjectRepository.repository == repository,
+                    )
+                )
+            )
+
+            mapping = result.scalars().first()
+
+            return (
+                self._project_repo_record_from_model(mapping)
+                if mapping
+                else None
+            )

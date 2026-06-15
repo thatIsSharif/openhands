@@ -25,6 +25,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from .execution_models import ExecutionRecord, ExecutionState
 
 from openhands.app_server.utils.logger import openhands_logger as logger
 
@@ -47,9 +48,9 @@ def _is_langfuse_configured() -> bool:
 
 @dataclass
 class LangfuseTraceContext:
-    """Holds reference to an active Langfuse trace and spans."""
+    """Holds reference to an active Langfuse span."""
 
-    trace_id: str
+    span: object
     execution_id: str
 
 
@@ -102,48 +103,39 @@ class LangfuseService:
         self,
         execution: ExecutionRecord,
     ) -> LangfuseTraceContext | None:
-        """Create a Langfuse trace for an automation execution.
+        """Create a Langfuse trace for an automation execution."""
 
-        Returns a trace context if Langfuse is configured and the
-        trace was created. Returns None if Langfuse is not available
-        (no-op mode).
-        """
         client = self._get_client()
         if client is None:
             return None
 
-        trace_id = f'exec_{execution.execution_id}'
-
         try:
-            # Build trace metadata
             metadata: dict = {
                 'source_type': execution.source_type,
                 'execution_id': execution.execution_id,
             }
+
             if execution.jira_issue_key:
                 metadata['jira_issue_key'] = execution.jira_issue_key
+
             if execution.github_pr_id:
                 metadata['github_pr_id'] = execution.github_pr_id
+
             if execution.repository:
                 metadata['repository'] = execution.repository
+
             if execution.branch:
                 metadata['branch'] = execution.branch
 
-            trace = client.trace(
-                id=trace_id,
+            span = client.start_observation(
                 name=f'Automation: {execution.source_type}',
                 input=metadata,
                 metadata=metadata,
-                session_id=execution.execution_id,
-            )
-            # Create root span
-            trace.span(
-                name='OpenHands Run',
-                metadata=metadata,
+                as_type='span',
             )
 
             logger.info(
-                f'[Automation] Langfuse trace created: {trace_id}',
+                f'[Automation] Langfuse trace created: {execution.execution_id}',
                 extra=build_log_context(
                     execution_id=execution.execution_id,
                     jira_issue_key=execution.jira_issue_key,
@@ -152,10 +144,12 @@ class LangfuseService:
                     branch=execution.branch,
                 ),
             )
+
             return LangfuseTraceContext(
-                trace_id=trace_id,
+                span=span,
                 execution_id=execution.execution_id,
             )
+
         except Exception as e:
             logger.warning(
                 f'[Automation] Failed to create Langfuse trace: {e}'
@@ -167,16 +161,9 @@ class LangfuseService:
         trace_ctx: LangfuseTraceContext | None,
         execution: ExecutionRecord,
     ) -> None:
-        """Finalize a Langfuse trace with execution results.
+        """Finalize a Langfuse trace with execution results."""
 
-        Updates the trace with output, final status, cost, and
-        token usage. Safe to call with None trace_ctx (no-op).
-        """
         if trace_ctx is None:
-            return
-
-        client = self._get_client()
-        if client is None:
             return
 
         try:
@@ -184,32 +171,43 @@ class LangfuseService:
                 'status': execution.state.value,
                 'execution_id': execution.execution_id,
             }
+
             if execution.conversation_id:
                 output['conversation_id'] = execution.conversation_id
+
             if execution.error_message:
                 output['error_message'] = execution.error_message
+
             if execution.started_at and execution.completed_at:
                 duration = (
                     execution.completed_at - execution.started_at
                 ).total_seconds()
+
                 output['duration_seconds'] = duration
 
-            client.trace(
-                id=trace_ctx.trace_id,
+            trace_ctx.span.update(
                 output=output,
                 metadata={
-                    **({'level': 'ERROR'} if execution.state.value == 'FAILED' else {}),
+                    'status': execution.state.value,
+                    **(
+                        {'level': 'ERROR'}
+                        if execution.state == ExecutionState.FAILED
+                        else {}
+                    ),
                 },
             )
 
+            trace_ctx.span.end()
+
             logger.info(
                 f'[Automation] Langfuse trace finalized: '
-                f'{trace_ctx.trace_id} → {execution.state.value}',
+                f'{execution.execution_id} → {execution.state.value}',
                 extra=build_log_context(
                     execution_id=execution.execution_id,
                     conversation_id=execution.conversation_id or '',
                 ),
             )
+
         except Exception as e:
             logger.warning(
                 f'[Automation] Failed to finalize Langfuse trace: {e}'
