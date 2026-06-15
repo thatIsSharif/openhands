@@ -27,7 +27,7 @@ class SourceType(str, Enum):
 
 VALID_TRANSITIONS: dict[ExecutionState, set[ExecutionState]] = {
     ExecutionState.RECEIVED: {ExecutionState.QUEUED, ExecutionState.CANCELLED},
-    ExecutionState.QUEUED: {ExecutionState.RUNNING, ExecutionState.CANCELLED},
+    ExecutionState.QUEUED: {ExecutionState.RUNNING, ExecutionState.CANCELLED, ExecutionState.FAILED},
     ExecutionState.RUNNING: {
         ExecutionState.COMPLETED,
         ExecutionState.FAILED,

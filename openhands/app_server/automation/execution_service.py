@@ -112,6 +112,9 @@ class ExecutionService:
             return None
 
         current = record.state
+        if isinstance(target, str):
+            target = ExecutionState(target)
+
         validate_transition(current, target)
 
         updated = await self.store.update_state(
@@ -122,9 +125,10 @@ class ExecutionService:
         )
 
         if updated:
+            target_str = target.value if hasattr(target, "value") else target
             logger.info(
-                f'[Automation] Execution {execution_id}: {current.value} '
-                f'\u2192 {target.value}',
+                f'[Automation] Execution {execution_id} '
+                f'→ {target_str}',
                 extra=build_log_context(
                     execution_id=execution_id,
                     conversation_id=conversation_id,

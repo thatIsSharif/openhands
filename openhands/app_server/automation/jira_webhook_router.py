@@ -19,7 +19,7 @@ from openhands.app_server.automation.jira_automation_service import (
 )
 from openhands.app_server.utils.logger import openhands_logger as logger
 
-router = APIRouter(prefix='/webhooks/jira', tags=['automation'])
+router = APIRouter(prefix='/jira/start', tags=['automation'])
 
 
 class JiraWebhookResponse(OpenHandsModel):
@@ -131,5 +131,6 @@ async def _process_jira_event(
             f'[Automation] Jira event processed: {result.get("status")} '
             f'(execution: {result.get("execution_id", "N/A")})',
         )
-    except Exception as e:
-        logger.error(f'[Automation] Jira background processing failed: {e}')
+    except Exception:
+        import traceback
+        logger.error(traceback.format_exc())

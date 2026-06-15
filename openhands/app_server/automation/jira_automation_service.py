@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from openhands.app_server.utils.logger import openhands_logger as logger
 
 from .correlation import build_log_context
-from .execution_models import SourceType
+from .execution_models import ExecutionState, SourceType
 from .execution_service import ExecutionService
 from .execution_store import ExecutionStore
 from .openhands_client import OpenHandsClient
@@ -197,9 +197,9 @@ class JiraAutomationService:
                     jira_project_key=project_key,
                     issue_payload=payload,
                 )
-                repository_str = resolved.repository
                 owner = resolved.owner
                 default_branch = resolved.default_branch
+                repository_str = f"{owner}/{resolved.repository}"
                 logger.info(
                     f'[Automation] Resolved repository for {project_key}: '
                     f'{repository_str} (via {resolved.resolved_by})',
@@ -265,7 +265,7 @@ class JiraAutomationService:
 
         # Enqueue as RECEIVED → QUEUED
         await self.execution_service.transition_state(
-            execution_id, 'QUEUED'  # type: ignore[arg-type]
+            execution_id, ExecutionState.QUEUED
         )
 
         # Build prompt from template with full context
@@ -293,13 +293,14 @@ class JiraAutomationService:
             execution_id=execution_id,
             jira_issue_key=issue_key,
             repository=repository_str,
+            branch=default_branch or "main",
         )
 
         if conversation_id:
             # Transition to RUNNING
             await self.execution_service.transition_state(
                 execution_id,
-                'RUNNING',  # type: ignore[arg-type]
+                ExecutionState.RUNNING,
                 conversation_id=conversation_id,
             )
             return {
@@ -312,7 +313,7 @@ class JiraAutomationService:
         else:
             await self.execution_service.transition_state(
                 execution_id,
-                'FAILED',  # type: ignore[arg-type]
+                ExecutionState.FAILED,
                 error_message='Failed to create OpenHands conversation',
             )
             return {

@@ -127,7 +127,10 @@ class ExecutionStore:
                 )
                 return None
 
-            execution.state = state.value
+            if isinstance(state, str):
+                execution.state = state
+            else:
+                execution.state = state.value
             execution.updated_at = now
 
             if error_message is not None:
@@ -146,7 +149,8 @@ class ExecutionStore:
             await session.commit()
             await session.refresh(execution)
             logger.info(
-                f'[Automation] Execution {execution_id} state \u2192 {state.value}'
+                f'[Automation] Execution {execution_id} state → '
+                f'{state.value if hasattr(state, "value") else state}'
             )
             return self._record_from_model(execution)
 
