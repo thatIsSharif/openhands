@@ -1,8 +1,26 @@
 # Metrics Persistence Investigation
 
-## Root Cause Analysis
+## Root Cause Analysis - Debugging Investigation (June 2026)
 
-### Bug: `total_tokens` Hardcoded to Zero
+### Bug 0: `_info()` / `_debug()` / `_warn()` / `_error()` logger wrappers use `**kwargs` instead of `*args`
+
+**File:** `openhands/app_server/services/mlflow_tracker.py`
+
+**Severity: CRITICAL**
+
+The logging wrapper functions were defined as `def _info(msg: str, **kwargs)`
+but called with positional format args: `_info('uri=%s experiment=%s', uri, name)`.
+This caused `TypeError: _info() takes 1 positional argument but 3 were given`
+during `initialize()`, which set `self._enabled = False`.
+
+This means the MLflowTracker immediately disabled itself on any call site
+using the standard logging `%s` format syntax. Any conversation that triggered
+a format-string log call would silently disable MLflow.
+
+**Fix:** Changed to `def _info(msg: str, *args, **kwargs)` to match the standard
+`logging.info(msg, *args, **kwargs)` signature.
+
+### Bug 1: `total_tokens` Hardcoded to Zero
 
 **File:** `openhands/app_server/app_conversation/sql_app_conversation_info_service.py`
 
@@ -105,3 +123,81 @@ thread-safe, per-conversation run registry pattern:
 - Environment variable `MLFLOW_TRACKING_URI` gates all MLflow activity
 - No mlflow dependency added to pyproject.toml (optional, user-installed)
 - No enterprise code modified
+
+---
+
+## Debug Investigation Findings (June 2026)
+
+### Bug A (CRITICAL - FIXED): Logger wrappers don't accept \`*args\`
+
+**File:** `openhands/app_server/services/mlflow_tracker.py`
+
+The `_info()`, `_debug()`, `_warn()`, `_error()` helper functions used
+`def fn(msg, **kwargs)` but call sites used `fn('fmt %s', arg)` (positional
+format args). This caused `TypeError` during `initialize()` which permanently
+disabled the tracker.
+
+**Evidence:** Verified by inserting a call to `_info('uri=%s', uri)` which
+raised `TypeError: _info() takes 1 positional argument but 3 were given`.
+The exception was caught by the generic `except Exception` in `initialize()`,
+setting `self._enabled = False`.
+
+**Fix:** Changed signatures to `def fn(msg, *args, **kwargs)`.
+
+### Bug B (HIGH - FIXED): \`_track_conversation_terminal\` uses stale metrics
+
+**File:** `openhands/app_server/event_callback/webhook_router.py`, lines 127-138
+
+The function reads `app_conversation_info.metrics` which is always `None`
+for conversations where no metrics were explicitly set at creation.
+`_to_info()` in `sql_app_conversation_info_service.py` DOES rebuild
+`MetricsSnapshot` from stored DB columns, but `valid_conversation()`
+dependency injection runs before `process_stats_event()` updates the DB.
+
+**Evidence:** Code inspection shows `app_conversation_info.metrics was None`
+consistently for new conversations. The `if metrics:` check in the final
+MLflow logging block was always False.
+
+**Fix:** Added a fallback DB query in `_track_conversation_terminal`:
+if `app_conversation_info.metrics` is None/zero, re-fetch from the DB
+via `app_conversation_info_service.get_app_conversation_info()`.
+
+### Bug C (MEDIUM - FIXED): No \`MLFLOW_ENABLED\` env var support
+
+**File:** `openhands/app_server/services/mlflow_tracker.py`
+
+`is_mlflow_enabled()` only checked `MLFLOW_TRACKING_URI`. Users might set
+`MLFLOW_ENABLED=true` expecting it to work.
+
+**Fix:** Added `MLFLOW_ENABLED` check (accepts 'true' or '1').
+
+### Bug D (OBSERVED): MLflow 3.x rejects \`file://\` URIs
+
+MLflow 3.x requires `sqlite:///` for local tracking or `http://` for a server.
+The error is: "The filesystem tracking backend is in maintenance mode".
+
+**Fix:** Documentation updated to recommend `sqlite:///mlflow.db` or
+`http://localhost:5000`.
+
+### Root Cause: Why No Data Appears in MLflow UI
+
+**The most likely production cause:** `MLFLOW_TRACKING_URI` environment variable
+not set in the app server process. Without this, `is_mlflow_enabled()` returns
+False and no MLflow operations are performed.
+
+**Second most likely cause:** `initialize()` failed (due to Bug A or MLflow 3.x
+file URI rejection), setting `_enabled = False` permanently (singleton, no retry).
+
+**Event deserialization:** ✅ Verified working end-to-end. `ConversationStateUpdateEvent`
+with `key='stats'` correctly deserializes via `Event.model_validate()`.
+
+**MLflowTracker lifecycle:** ✅ Verified working end-to-end with SQLite backend.
+`start_run()`, `log_metrics()`, `end_run()` all succeed. MLflow API queries
+confirm runs, metrics, and params are stored.
+
+**Stats webhook flow:** The agent server's `_setup_stats_streaming()` (event_service.py:800)
+installs callbacks that fire on every LLM completion. Stats are emitted as
+`ConversationStateUpdateEvent(key='stats')` via the pub/sub → webhook pipeline.
+This mechanism is present in openhands-agent-server==1.28.0 and verified by
+code inspection.
+

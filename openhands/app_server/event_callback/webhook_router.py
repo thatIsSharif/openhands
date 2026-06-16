@@ -112,6 +112,7 @@ async def _track_conversation_terminal(
     app_conversation_info: AppConversationInfo,
     events: list[Event],
     exec_status: ConversationExecutionStatus,
+    app_conversation_info_service: AppConversationInfoService | None = None,
 ) -> None:
     """Track analytics for terminal conversation states.
 
@@ -123,7 +124,7 @@ async def _track_conversation_terminal(
 
     ctx = await resolve_analytics_context(app_conversation_info.created_by_user_id)
 
-    # Extract metrics
+    # Extract metrics from app_conversation_info (may be stale/None)
     metrics = app_conversation_info.metrics
     accumulated_cost = metrics.accumulated_cost if metrics else None
     prompt_tokens = (
@@ -136,6 +137,29 @@ async def _track_conversation_terminal(
         if metrics and metrics.accumulated_token_usage
         else None
     )
+
+    # Try to fetch actual accumulated metrics from the stored metadata (V1)
+    # The app_conversation_info.metrics is set at creation and never updated,
+    # while the stored metadata is updated by process_stats_event().
+    if app_conversation_info_service and (not metrics or not metrics.accumulated_cost):
+        try:
+            fresh_info = await app_conversation_info_service.get_app_conversation_info(
+                conversation_id
+            )
+            if fresh_info and fresh_info.metrics:
+                fresh_metrics = fresh_info.metrics
+                if not metrics or not metrics.accumulated_cost:
+                    accumulated_cost = fresh_metrics.accumulated_cost
+                if not metrics or not metrics.accumulated_token_usage:
+                    if fresh_metrics.accumulated_token_usage:
+                        prompt_tokens = fresh_metrics.accumulated_token_usage.prompt_tokens
+                        completion_tokens = fresh_metrics.accumulated_token_usage.completion_tokens
+                # Use the fresh metrics object for the final MLflow logging
+                metrics = fresh_metrics
+        except Exception:
+            _logger.exception(
+                'Failed to fetch fresh info for %s', conversation_id
+            )
 
     is_error = exec_status in (
         ConversationExecutionStatus.ERROR,
@@ -173,6 +197,11 @@ async def _track_conversation_terminal(
         # End MLflow run for errored conversations
         if is_mlflow_enabled():
             try:
+                _logger.info(
+                    'MLflow: Ending errored conversation %s, error=%s',
+                    conversation_id,
+                    error_message,
+                )
                 get_mlflow_tracker().end_conversation(
                     conversation_id,
                     status='error',
@@ -205,28 +234,37 @@ async def _track_conversation_terminal(
             # Log final metrics as a last snapshot before ending the run
             # This ensures metrics are captured even if stats events were not emitted
             metrics_dict = {}
-            if metrics:
-                metrics_dict['accumulated_cost'] = accumulated_cost
-                if metrics.accumulated_token_usage:
-                    metrics_dict['prompt_tokens'] = (
-                        metrics.accumulated_token_usage.prompt_tokens
-                    )
-                    metrics_dict['completion_tokens'] = (
-                        metrics.accumulated_token_usage.completion_tokens
-                    )
-                    metrics_dict['cache_read_tokens'] = (
-                        metrics.accumulated_token_usage.cache_read_tokens
-                    )
-                    metrics_dict['cache_write_tokens'] = (
-                        metrics.accumulated_token_usage.cache_write_tokens
-                    )
-                    metrics_dict['reasoning_tokens'] = (
-                        metrics.accumulated_token_usage.reasoning_tokens
-                    )
+            if metrics and metrics.accumulated_token_usage:
+                metrics_dict['accumulated_cost'] = metrics.accumulated_cost
+                metrics_dict['prompt_tokens'] = (
+                    metrics.accumulated_token_usage.prompt_tokens
+                )
+                metrics_dict['completion_tokens'] = (
+                    metrics.accumulated_token_usage.completion_tokens
+                )
+                metrics_dict['cache_read_tokens'] = (
+                    metrics.accumulated_token_usage.cache_read_tokens
+                )
+                metrics_dict['cache_write_tokens'] = (
+                    metrics.accumulated_token_usage.cache_write_tokens
+                )
+                metrics_dict['reasoning_tokens'] = (
+                    metrics.accumulated_token_usage.reasoning_tokens
+                )
 
             if metrics_dict:
+                _logger.info(
+                    'MLflow: Logging final metrics for %s: %s',
+                    conversation_id,
+                    metrics_dict,
+                )
                 get_mlflow_tracker().log_metrics(conversation_id, metrics_dict)
 
+            _logger.info(
+                'MLflow: Ending completed conversation %s, status=%s',
+                conversation_id,
+                exec_status.value,
+            )
             get_mlflow_tracker().end_conversation(
                 conversation_id,
                 status=exec_status.value,
@@ -445,8 +483,14 @@ async def on_conversation_update(
 
         # Start MLflow run when a new conversation starts
         if is_mlflow_enabled():
+            _logger.info(
+                'MLflow: Starting run for conversation %s (trigger=%s, model=%s)',
+                conversation_info.id,
+                trigger.value if trigger else None,
+                llm_model,
+            )
             mlflow_tracker = get_mlflow_tracker()
-            mlflow_tracker.start_conversation(
+            result = mlflow_tracker.start_conversation(
                 conversation_id=conversation_info.id,
                 metadata={
                     'repository': existing.selected_repository,
@@ -457,6 +501,11 @@ async def on_conversation_update(
                     or f'Conversation {conversation_info.id.hex}',
                     'sandbox_id': sandbox_record.id,
                 },
+            )
+            _logger.info(
+                'MLflow: start_conversation result=%s for %s',
+                result,
+                conversation_info.id,
             )
 
     # Analytics: conversation created
@@ -493,6 +542,12 @@ async def on_event(
         # Process stats events for V1 conversations
         for event in events:
             if isinstance(event, ConversationStateUpdateEvent) and event.key == 'stats':
+                _logger.info(
+                    'MLflow: Stats event received for conversation=%s, '
+                    'event type=%s',
+                    conversation_id,
+                    type(event).__name__,
+                )
                 await app_conversation_info_service.process_stats_event(
                     event, conversation_id
                 )
@@ -502,10 +557,27 @@ async def on_event(
                     try:
                         mlflow_tracker = get_mlflow_tracker()
                         event_value = event.value
+                        _logger.info(
+                            'MLflow: Stats event value type=%s for %s',
+                            type(event_value).__name__,
+                            conversation_id,
+                        )
                         if isinstance(event_value, dict):
                             usage_to_metrics = event_value.get('usage_to_metrics', {})
+                            _logger.info(
+                                'MLflow: usage_to_metrics keys=%s for %s',
+                                list(usage_to_metrics.keys()),
+                                conversation_id,
+                            )
                             agent_metrics = usage_to_metrics.get('agent', {})
                             if agent_metrics:
+                                _logger.info(
+                                    'MLflow: agent_metrics found for %s: '
+                                    'cost=%s, token_usage=%s',
+                                    conversation_id,
+                                    agent_metrics.get('accumulated_cost'),
+                                    agent_metrics.get('accumulated_token_usage', {}),
+                                )
                                 acc_usage = agent_metrics.get(
                                     'accumulated_token_usage', {}
                                 ) or {}
@@ -530,6 +602,18 @@ async def on_event(
                                         ),
                                     },
                                 )
+                            else:
+                                _logger.info(
+                                    'MLflow: No agent_metrics in stats event for %s',
+                                    conversation_id,
+                                )
+                        else:
+                            _logger.info(
+                                'MLflow: Stats event value is not a dict for %s: '
+                                'value=%s',
+                                conversation_id,
+                                event_value,
+                            )
                     except Exception:
                         _logger.exception(
                             'MLflow stats logging failed for %s', conversation_id
@@ -568,7 +652,11 @@ async def on_event(
                 exec_status = ConversationExecutionStatus(event.value)
                 if exec_status.is_terminal():
                     await _track_conversation_terminal(
-                        conversation_id, app_conversation_info, events, exec_status
+                        conversation_id,
+                        app_conversation_info,
+                        events,
+                        exec_status,
+                        app_conversation_info_service=app_conversation_info_service,
                     )
             except Exception:
                 _logger.exception('analytics:conversation_terminal:failed')
