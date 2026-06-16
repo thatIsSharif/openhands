@@ -1,433 +1,407 @@
-MLflow Integration with OpenHands: Complete Guide
-What Can You Achieve with MLflow?
-
-1. Metrics Tracking ✅ Perfect Fit
-OpenHands Data	MLflow Method
-Input/Output tokens	mlflow.log_metrics()
-Latency	mlflow.log_metrics()
-Cost	mlflow.log_metrics()
-Cache hits	mlflow.log_metrics()
-Reasoning tokens	mlflow.log_metrics()
-
-
-2. Parameters/Config Logging ✅ Perfect Fit
-Model name, temperature, max tokens
-Condenser settings
-Repository, branch, trigger type
-Skills loaded
-
-
-3. Artifacts ✅ Good Fit
-Conversation summaries
-Generated code files
-Task outputs
-Screenshots (if enabled)
-
-
-4. Traces/Spans ⚠️ Limited
-MLflow tracing is more for LLM calls within a pipeline
-OpenHands uses Laminar for fine-grained spans (optional)
-
-
-5. Evaluation ✅ Good Fit
-Compare runs across repositories
-Track task completion rates
-Cost efficiency analysis
-Integration Approach
-Option A: Minimal Integration (Recommended for Start)
-
-
-
-openhands_mlflow_integration.py
-
-import mlflow
-from mlflow import log_metric, log_params, log_text
-from openhands.sdk.llm.utils.metrics import Metrics, TokenUsage
-
-class OpenHandsMLflowTracker:
-"""Simple MLflow tracker for OpenHands conversations."""
-
-def __init__(self, tracking_uri: str = "http://localhost:5000"):
-    mlflow.set_tracking_uri(tracking_uri)
-    self.experiment_name = "openhands-conversations"
-    mlflow.set_experiment(self.experiment_name)
-
-def start_conversation_run(self, conversation_id: str, metadata: dict):
-    """Start a run for a new conversation."""
-    mlflow.start_run(run_name=conversation_id)
-    mlflow.log_params({
-        "conversation_id": conversation_id,
-        "repository": metadata.get("selected_repository", "none"),
-        "branch": metadata.get("selected_branch", "main"),
-        "trigger": metadata.get("trigger", "gui"),
-        "llm_model": metadata.get("llm_model", "unknown"),
-    })
-
-def log_conversation_metrics(self, metrics: Metrics):
-    """Log token usage and cost metrics."""
-    mlflow.log_metrics({
-        "prompt_tokens": metrics.accumulated_token_usage.prompt_tokens,
-        "completion_tokens": metrics.accumulated_token_usage.completion_tokens,
-        "cache_read_tokens": metrics.accumulated_token_usage.cache_read_tokens,
-        "cache_write_tokens": metrics.accumulated_token_usage.cache_write_tokens,
-        "reasoning_tokens": metrics.accumulated_token_usage.reasoning_tokens,
-        "total_cost": metrics.accumulated_cost,
-        "context_window": metrics.accumulated_token_usage.context_window,
-    })
-
-def log_latency(self, latency_seconds: float):
-    """Log response latency."""
-    mlflow.log_metric("latency_seconds", latency_seconds)
-
-def log_conversation_summary(self, summary: str):
-    """Log conversation summary as artifact."""
-    mlflow.log_text(summary, "conversation_summary.txt")
-
-def end_run(self):
-    """End the current MLflow run."""
-    mlflow.end_run()
-
-Option B: Callback-Based Integration (Production Ready)
-
-openhands_mlflow_callback.py
-
-from openhands.sdk.event import Event, ConversationStateUpdateEvent
-from openhands.sdk.conversation import ConversationExecutionStatus
-import mlflow
-from datetime import datetime
-
-class MLflowConversationCallback:
-"""
-Integrate MLflow tracking into OpenHands conversation lifecycle.
-
-Usage:
-    callback = MLflowConversationCallback(tracking_uri="http://mlflow:5000")
-    # Register with conversation service
-"""
-
-def __init__(self, tracking_uri: str, experiment_name: str = "openhands"):
-    self.tracking_uri = tracking_uri
-    self.experiment_name = experiment_name
-    self._setup_mlflow()
-
-def _setup_mlflow(self):
-    mlflow.set_tracking_uri(self.tracking_uri)
-    mlflow.set_experiment(self.experiment_name)
-    mlflow.enable_system_metrics_logging()
-
-def on_conversation_start(self, conversation_id: str, metadata: dict):
-    """Called when a new conversation starts."""
-    self.run = mlflow.start_run(run_name=f"conv_{conversation_id}")
-
-    # Log conversation metadata
-    mlflow.log_params({
-        "conversation_id": conversation_id,
-        "start_time": datetime.utcnow().isoformat(),
-        "repository": metadata.get("selected_repository", ""),
-        "branch": metadata.get("selected_branch", ""),
-        "trigger": metadata.get("trigger", ""),
-        "agent_type": metadata.get("agent_type", "default"),
-    })
-
-def on_stats_update(self, metrics: dict):
-    """Called periodically with updated metrics."""
-    mlflow.log_metrics({
-        "prompt_tokens": metrics.get("prompt_tokens", 0),
-        "completion_tokens": metrics.get("completion_tokens", 0),
-        "cache_read_tokens": metrics.get("cache_read_tokens", 0),
-        "cache_write_tokens": metrics.get("cache_write_tokens", 0),
-        "accumulated_cost": metrics.get("accumulated_cost", 0.0),
-        "total_tokens": metrics.get("total_tokens", 0),
-    }, step=metrics.get("turn", 0))
-
-def on_latency_measurement(self, turn: int, latency: float, tokens: int):
-    """Log per-turn latency."""
-    mlflow.log_metrics({
-        f"turn_{turn}_latency": latency,
-        f"turn_{turn}_tokens": tokens,
-    })
-
-def on_conversation_end(self, status: ConversationExecutionStatus, summary: str = ""):
-    """Called when conversation completes."""
-    mlflow.log_params({
-        "end_time": datetime.utcnow().isoformat(),
-        "status": status.value if status else "unknown",
-    })
-
-    if summary:
-        mlflow.log_text(summary, "final_summary.txt")
-
-    mlflow.end_run()
-
-Where to Integrate in OpenHands
-Integration Points
-openhands/
-├── app_server/
-│   ├── app_conversation/
-│   │   ├── app_conversation_service_base.py  ← Start/end runs
-│   │   └── sql_app_conversation_info_service.py  ← Store MLflow run_id
-│   └── event_callback/
-│       └── webhook_router.py  ← Periodic metrics logging
-Code Changes Required
-
-1. Create the MLflow Service
-File: openhands/app_server/services/mlflow_tracker.py (NEW)
-
-
-
-"""MLflow tracking service for OpenHands conversations."""
-
-import mlflow
-from datetime import datetime
-from typing import Optional
-from uuid import UUID
-
-class MLflowTracker:
-"""MLflow tracker for OpenHands observability."""
-
-def __init__(
-    self,
-    tracking_uri: str,
-    experiment_name: str = "openhands-conversations",
-):
-    self.tracking_uri = tracking_uri
-    self.experiment_name = experiment_name
-    self._active_run_id: Optional[str] = None
-    self._turn_count = 0
-
-def initialize(self):
-    """Initialize MLflow connection."""
-    mlflow.set_tracking_uri(self.tracking_uri)
-    mlflow.set_experiment(self.experiment_name)
-
-def start_conversation(
-    self,
-    conversation_id: UUID,
-    repository: Optional[str] = None,
-    branch: Optional[str] = None,
-    trigger: Optional[str] = None,
-    llm_model: Optional[str] = None,
-) -> str:
-    """Start MLflow run for a conversation. Returns run_id."""
-    self._turn_count = 0
-    run = mlflow.start_run(run_name=str(conversation_id))
-    self._active_run_id = run.info.run_id
-
-    mlflow.log_params({
-        "conversation_id": str(conversation_id),
-        "start_time": datetime.utcnow().isoformat(),
-        "repository": repository or "none",
-        "branch": branch or "main",
-        "trigger": trigger or "unknown",
-        "llm_model": llm_model or "unknown",
-    })
-
-    return self._active_run_id
-
-def log_metrics(
-    self,
-    prompt_tokens: int = 0,
-    completion_tokens: int = 0,
-    cache_read_tokens: int = 0,
-    cache_write_tokens: int = 0,
-    reasoning_tokens: int = 0,
-    accumulated_cost: float = 0.0,
-    latency_seconds: float = 0.0,
-):
-    """Log token and cost metrics."""
-    if not self._active_run_id:
-        return
-
-    mlflow.log_metrics({
-        "prompt_tokens": prompt_tokens,
-        "completion_tokens": completion_tokens,
-        "total_tokens": prompt_tokens + completion_tokens,
-        "cache_read_tokens": cache_read_tokens,
-        "cache_write_tokens": cache_write_tokens,
-        "reasoning_tokens": reasoning_tokens,
-        "accumulated_cost": accumulated_cost,
-        "latency_seconds": latency_seconds,
-    }, step=self._turn_count)
-
-def increment_turn(self, latency: float = 0.0):
-    """Increment turn counter and log latency."""
-    self._turn_count += 1
-    mlflow.log_metrics({f"turn_{self._turn_count}_latency": latency})
-
-def log_conversation_summary(self, summary: str):
-    """Log final conversation summary."""
-    if self._active_run_id:
-        mlflow.log_text(summary, "conversation_summary.txt")
-
-def end_conversation(self, status: str, error: Optional[str] = None):
-    """End the conversation run."""
-    if not self._active_run_id:
-        return
-
-    mlflow.log_params({
-        "end_time": datetime.utcnow().isoformat(),
-        "status": status,
-        "total_turns": self._turn_count,
-    })
-
-    if error:
-        mlflow.log_text(error, "error.txt")
-
-    mlflow.end_run()
-    self._active_run_id = None
-
-2. Integrate with Conversation Service
-File: openhands/app_server/app_conversation/app_conversation_service_base.py
-
-
-
-Add integration in _start_conversation method:
-
-In _start_conversation or similar method
-
-from openhands.app_server.services.mlflow_tracker import MLflowTracker
-
-class AppConversationServiceBase:
-def init(self, ..., mlflow_tracker: MLflowTracker | None = None):
-self.mlflow_tracker = mlflow_tracker
-
-async def _start_conversation(self, ...):
-    # Existing code...
-
-    # Add MLflow tracking
-    if self.mlflow_tracker:
-        self.mlflow_tracker.start_conversation(
-            conversation_id=conversation_id,
-            repository=request.selected_repository,
-            branch=request.selected_branch,
-            trigger=request.trigger.value if request.trigger else None,
-            llm_model=request.llm_model,
-        )
-
-    # Continue with existing flow...
-
-3. Hook into Metrics Updates
-File: openhands/app_server/event_callback/webhook_router.py
-
-
-
-In on_event or stats processing:
-
-When processing stats events
-
-if self.mlflow_tracker and stats:
-self.mlflow_tracker.log_metrics(
-prompt_tokens=stats.usage_to_metrics.get("prompt_tokens", 0),
-completion_tokens=stats.usage_to_metrics.get("completion_tokens", 0),
-cache_read_tokens=stats.usage_to_metrics.get("cache_read_tokens", 0),
-cache_write_tokens=stats.usage_to_metrics.get("cache_write_tokens", 0),
-reasoning_tokens=stats.usage_to_metrics.get("reasoning_tokens", 0),
-accumulated_cost=stats.accumulated_cost or 0.0,
-)
-MLflow Setup
-
-1. Start MLflow Server
-
-
-
-Option A: Local
-
-mlflow server --backend-store-uri sqlite:///mlflow.db \
---default-artifact-root ./mlflow_artifacts \
---host 0.0.0.0 --port 5000
-
-Option B: With Docker
-
-docker run -p 5000:5000 \
--v $(pwd)/mlflow:/mlflow \
-ghcr.io/mlflow/mlflow:latest \
-mlflow server --backend-store-uri sqlite:////mlflow/mlflow.db \
---default-artifact-root /mlflow/artifacts
-
-Option C: Remote (e.g., Databricks, etc.)
-
-mlflow.set_tracking_uri("databricks://<profile>")
-2. Environment Configuration
-
-.env file
-
-MLFLOW_TRACKING_URI=http://localhost:5000
-MLFLOW_EXPERIMENT_NAME=openhands-conversations
-MLFLOW_LOG_SYSTEM_METRICS=true
-What You Can Analyze with MLflow
-
-1. Cost Analysis Dashboard
-┌─────────────────────────────────────────────────┐
-│  Cost per Repository                            │
-├─────────────────────────────────────────────────┤
-│  owner/repo-a      ████████████  $12.45         │
-│  owner/repo-b      ██████        $5.23          │
-│  owner/repo-c      ████          $2.10          │
-└─────────────────────────────────────────────────┘
-
-
-2. Token Usage Trends
-Average tokens per conversation
-Token efficiency by model
-Cache hit rate over time
-
-
-3. Latency Analysis
-Per-turn latency
-Bottleneck identification
-Model comparison
-
-
-4. Trigger Analysis
-Cost by trigger type (Jira, GitHub, GUI)
-Success rates by trigger
-
-
-5. Repository Comparison
-┌──────────────────────────────────────────────────┐
-│  Repository Efficiency (Cost/Task Completion)     │
-├──────────────────────────────────────────────────┤
-│  repo-a    3 tasks avg $4.50/task   ✓           │
-│  repo-b    7 tasks avg $1.20/task   ✓✓           │
-│  repo-c    2 tasks avg $8.50/task   ✗            │
-└──────────────────────────────────────────────────┘
-Easy Integration Checklist
-Step	Action	Effort
-1	Add mlflow to requirements.txt	1 min
-2	Create MLflowTracker service class	30 min
-3	Inject tracker into conversation service	15 min
-4	Add log_metrics() in stats callback	15 min
-5	Configure tracking URI	5 min
-6	Start MLflow server	5 min
-Total Time: ~1.5 hours for full integration
-
-
-
-Comparison: MLflow vs Laminar vs Native DB
-Feature	Native DB	MLflow	Laminar
-Setup Complexity	✅ None	⚠️ Server needed	❌ API key needed
-Query API	✅ REST	✅ REST + UI	✅ REST + UI
-Metrics	✅ Basic	✅ Advanced	✅ Advanced
-Traces	❌ None	⚠️ Basic	✅ Full
-Visualization	❌ None	✅ Excellent	✅ Excellent
-Cost Tracking	✅	✅	✅
-Token Tracking	✅	✅	✅
-Latency Tracking	✅	✅	✅
-Self-Hosted	✅	✅	❌ Cloud
-Open Source	✅	✅	❌ Proprietary
-Recommendation
-For your requirements (time, tokens, cost):
-
-✅ MLflow is a great choice because:
-
-Self-hosted - No external cloud dependencies
-Simple setup - Single server, SQLite backend works
-Excellent UI - Pre-built dashboards for metrics
-Rich queries - Filter by repository, time, trigger
-Artifact support - Store conversation summaries
-Production ready - Used by thousands of companies
-Start with:
-
+# MLflow Integration with OpenHands
+
+This document describes the MLflow integration for OpenHands conversation observability.
+MLflow captures token usage, cost, latency, and conversation metadata as MLflow runs,
+enabling analysis through MLflow's built-in dashboards and comparison tools.
+
+> **Note:** This integration is for the OpenHands community (OSS) version only.
+> It does not modify any enterprise or paid version code.
+
+---
+
+## Architecture
+
+The MLflow integration uses a lightweight, thread-safe tracker service that hooks into
+the existing webhook-based conversation lifecycle:
+
+```
+OpenHands Agent Server (sandbox)
+  │
+  ├─ POST /webhooks/conversations  →  on_conversation_update()
+  │                                    └── Start MLflow run (on new conversation)
+  │
+  ├─ POST /webhooks/events/{id}    →  on_event()
+  │                                    ├── Process stats → log_metrics()
+  │                                    └── Terminal state → end_conversation()
+  │
+  └─ _track_conversation_terminal()
+       └── Log final metrics + end MLflow run
+```
+
+### Key Components
+
+| Component | File | Purpose |
+|---|---|---|
+| `MLflowTracker` | `openhands/app_server/services/mlflow_tracker.py` | Thread-safe MLflow run management |
+| `get_mlflow_tracker()` | Same file | Singleton accessor |
+| `is_mlflow_enabled()` | Same file | Check if MLflow is configured |
+| Integration | `openhands/app_server/event_callback/webhook_router.py` | Lifecycle hooks |
+
+### Metrics Captured
+
+| Metric | Source | Description |
+|---|---|---|
+| `prompt_tokens` | `ConversationStats` → `TokenUsage` | Input tokens used |
+| `completion_tokens` | `ConversationStats` → `TokenUsage` | Output tokens generated |
+| `cache_read_tokens` | `ConversationStats` → `TokenUsage` | Prompt cache reads |
+| `cache_write_tokens` | `ConversationStats` → `TokenUsage` | Prompt cache writes |
+| `reasoning_tokens` | `ConversationStats` → `TokenUsage` | Reasoning tokens (thinking models) |
+| `accumulated_cost` | `ConversationStats` → `Metrics` | Total LLM cost in USD |
+| `latency_seconds` | Via step tracking | Per-turn response time |
+
+### Parameters Logged
+
+| Parameter | Description |
+|---|---|
+| `conversation_id` | Unique conversation identifier |
+| `repository` | Git repository (e.g., `owner/repo`) |
+| `branch` | Git branch |
+| `trigger` | Source: `gui`, `automation`, `resolver`, etc. |
+| `llm_model` | LLM model name (e.g., `gpt-4`, `claude-3`) |
+| `title` | Conversation title |
+| `start_time` | ISO 8601 timestamp |
+| `end_time` | ISO 8601 timestamp |
+| `status` | Final status: `finished`, `error`, `stopped` |
+| `duration_seconds` | Wall-clock duration |
+| `total_turns` | Number of agent turns |
+
+### Artifacts Stored
+
+| Artifact | Condition | Description |
+|---|---|---|
+| `error.txt` | On error | Error message if conversation failed |
+| `conversation_summary.txt` | On completion | Conversation summary (future) |
+
+---
+
+## Setup
+
+### Prerequisites
+
+- Python 3.9+
+- `mlflow` package installed
+- OpenHands app server running
+
+### 1. Install MLflow
+
+```bash
 pip install mlflow
-mlflow server --backend-store-uri sqlite:///mlflow.db
-Then add the MLflowTracker class to your OpenHands deployment.
+```
+
+### 2. Start MLflow Server
+
+**Option A: Local (SQLite)**
+
+```bash
+mkdir -p mlflow_data
+mlflow server \
+  --backend-store-uri sqlite:///mlflow_data/mlflow.db \
+  --default-artifact-root ./mlflow_data/artifacts \
+  --host 0.0.0.0 \
+  --port 5000
+```
+
+**Option B: Docker**
+
+```bash
+docker run -d --name mlflow-server \
+  -p 5000:5000 \
+  -v $(pwd)/mlflow_data:/mlflow \
+  ghcr.io/mlflow/mlflow:latest \
+  mlflow server \
+    --backend-store-uri sqlite:///mlflow/mlflow.db \
+    --default-artifact-root /mlflow/artifacts \
+    --host 0.0.0.0
+```
+
+**Option C: PostgreSQL (production)**
+
+```bash
+mlflow server \
+  --backend-store-uri postgresql://user:pass@localhost/mlflow \
+  --default-artifact-root s3://my-bucket/mlflow-artifacts \
+  --host 0.0.0.0 \
+  --port 5000
+```
+
+### 3. Configure OpenHands
+
+Set environment variables:
+
+```bash
+# Required: MLflow server URL
+export MLFLOW_TRACKING_URI=http://localhost:5000
+
+# Optional: Experiment name (default: openhands-conversations)
+export MLFLOW_EXPERIMENT_NAME=openhands-conversations
+```
+
+---
+
+## Running with Docker Compose
+
+Add MLflow to your `docker-compose.yml`:
+
+```yaml
+version: '3.8'
+services:
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:latest
+    ports:
+      - "5000:5000"
+    volumes:
+      - mlflow_data:/mlflow
+    command: >
+      mlflow server
+      --backend-store-uri sqlite:///mlflow/mlflow.db
+      --default-artifact-root /mlflow/artifacts
+      --host 0.0.0.0
+
+  openhands-app:
+    # ... existing OpenHands config ...
+    environment:
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
+      - MLFLOW_EXPERIMENT_NAME=openhands-conversations
+    depends_on:
+      - mlflow
+
+volumes:
+  mlflow_data:
+```
+
+---
+
+## Verification
+
+### 1. Check MLflow is Accessible
+
+```bash
+curl http://localhost:5000/api/2.0/mlflow/experiments/list
+```
+
+Expected response:
+```json
+{"experiments": [{"experiment_id": "0", "name": "Default"}]}
+```
+
+### 2. Create a Test Conversation
+
+Run an OpenHands conversation (either via GUI or automation). After the conversation completes,
+you should see an MLflow run appear.
+
+### 3. Verify Metrics Were Captured
+
+```bash
+# List runs in the experiment
+curl "http://localhost:5000/api/2.0/mlflow/runs/search?experiment_ids=[1]"
+```
+
+Or check metrics directly:
+```bash
+# Replace RUN_ID with the actual run ID
+curl "http://localhost:5000/api/2.0/mlflow/metrics/get-history?run_id=RUN_ID&metric_key=prompt_tokens"
+```
+
+### 4. Open MLflow UI
+
+Navigate to `http://localhost:5000` in your browser. Select the experiment
+(`openhands-conversations`) to view runs.
+
+---
+
+## Example MLflow Queries
+
+### List All Runs with Metrics
+
+```python
+import mlflow
+
+client = mlflow.MlflowClient()
+experiment = client.get_experiment_by_name("openhands-conversations")
+runs = client.search_runs(
+    experiment_ids=[experiment.experiment_id],
+    order_by=["attributes.start_time DESC"],
+    max_results=10,
+)
+
+for run in runs:
+    print(f"Run: {run.data.tags.get('mlflow.runName', 'unknown')}")
+    print(f"  Model: {run.data.params.get('llm_model', 'N/A')}")
+    print(f"  Cost: ${run.data.metrics.get('accumulated_cost', 0):.4f}")
+    print(f"  Tokens: {run.data.metrics.get('prompt_tokens', 0)} in, "
+          f"{run.data.metrics.get('completion_tokens', 0)} out")
+```
+
+### Cost Analysis by Trigger Type
+
+```python
+import mlflow
+
+client = mlflow.MlflowClient()
+experiment = client.get_experiment_by_name("openhands-conversations")
+runs = client.search_runs(
+    experiment_ids=[experiment.experiment_id],
+    order_by=["attributes.start_time DESC"],
+)
+
+by_trigger = {}
+for run in runs:
+    trigger = run.data.params.get("trigger", "unknown")
+    cost = run.data.metrics.get("accumulated_cost", 0)
+    by_trigger[trigger] = by_trigger.get(trigger, 0) + cost
+
+print("Cost by Trigger:")
+for trigger, cost in sorted(by_trigger.items(), key=lambda x: -x[1]):
+    print(f"  {trigger}: ${cost:.4f}")
+```
+
+### Token Usage Over Time
+
+```python
+import mlflow
+
+client = mlflow.MlflowClient()
+experiment = client.get_experiment_by_name("openhands-conversations")
+runs = client.search_runs(
+    experiment_ids=[experiment.experiment_id],
+    order_by=["attributes.start_time ASC"],
+)
+
+dates = []
+total_tokens = []
+for run in runs:
+    dates.append(run.info.start_time)
+    pt = run.data.metrics.get("prompt_tokens", 0)
+    ct = run.data.metrics.get("completion_tokens", 0)
+    total_tokens.append(pt + ct)
+
+# Plot with matplotlib or your preferred tool
+```
+
+---
+
+## Example Dashboards
+
+### Cost Analysis
+
+| Metric | Query |
+|---|---|
+| Total cost per repo | `SELECT repository, SUM(accumulated_cost) FROM runs GROUP BY repository` |
+| Cost by trigger type | `SELECT trigger, AVG(accumulated_cost) FROM runs GROUP BY trigger` |
+| Daily cost trend | `SELECT DATE(start_time), SUM(accumulated_cost) FROM runs GROUP BY 1` |
+
+### Token Usage
+
+| Metric | Query |
+|---|---|
+| Avg tokens per conversation | `SELECT AVG(prompt_tokens + completion_tokens) FROM runs` |
+| Cache hit rate | `SELECT SUM(cache_read_tokens) / SUM(cache_write_tokens + cache_read_tokens) FROM runs` |
+| Token ratio by model | `SELECT llm_model, AVG(prompt_tokens), AVG(completion_tokens) FROM runs GROUP BY llm_model` |
+
+### Performance
+
+| Metric | Query |
+|---|---|
+| Avg duration | `SELECT AVG(duration_seconds) FROM runs` |
+| Duration by trigger | `SELECT trigger, AVG(duration_seconds) FROM runs GROUP BY trigger` |
+| Success rate | `SELECT status, COUNT(*) FROM runs GROUP BY status` |
+
+---
+
+## Troubleshooting
+
+### MLflow Not Starting
+
+```bash
+# Check if MLflow is installed
+pip list | grep mlflow
+
+# Test MLflow server manually
+python -m mlflow server --host 0.0.0.0 --port 5000
+```
+
+### Metrics Not Appearing
+
+1. **Check environment:** Verify `MLFLOW_TRACKING_URI` is set correctly
+2. **Check logs:** Look for `MLflow` entries in OpenHands app server logs
+3. **Run a conversation:** MLflow only creates runs when conversations start
+4. **Check network:** Ensure OpenHands can reach the MLflow server
+
+### MLflow Causing Issues
+
+MLflow failures are always isolated:
+- Errors are logged but never raised
+- Conversations continue normally if MLflow is unavailable
+- MLflow being down does not affect conversation execution
+
+### Enable Debug Logging
+
+```bash
+export LOG_LEVEL=DEBUG
+```
+
+Or add to your Python logger config:
+```python
+logging.getLogger("openhands.app_server.services.mlflow_tracker").setLevel(logging.DEBUG)
+```
+
+---
+
+## Environment Variables Reference
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `MLFLOW_TRACKING_URI` | Yes | — | MLflow server URL (e.g., `http://localhost:5000`) |
+| `MLFLOW_EXPERIMENT_NAME` | No | `openhands-conversations` | MLflow experiment name |
+
+MLflow is **disabled** when `MLFLOW_TRACKING_URI` is not set or empty.
+
+---
+
+## Implementation Details
+
+### Thread Safety
+
+The `MLflowTracker` uses:
+- `threading.Lock` for all run state access
+- Per-conversation state stored in a dict keyed by conversation ID
+- No global MLflow run state (each conversation has its own run)
+
+### Error Isolation
+
+All MLflow operations are wrapped in try/except blocks:
+- `initialize()`: Disables MLflow on failure, logs warning
+- `start_conversation()`: Logs warning, returns False
+- `log_metrics()`: Logs warning, returns False
+- `end_conversation()`: Logs warning, returns False
+
+### No Hardcoded Values
+
+All metrics come from actual OpenHands `Metrics` and `TokenUsage` objects.
+No duplicate metric calculations are performed — the implementation uses
+existing metrics generated by OpenHands LLM tracking.
+
+---
+
+## Files Changed
+
+| File | Change |
+|---|---|
+| `openhands/app_server/services/mlflow_tracker.py` | **NEW** — MLflow tracker service |
+| `openhands/app_server/event_callback/webhook_router.py` | Modified — MLflow lifecycle hooks |
+| `openhands/app_server/app_conversation/sql_app_conversation_info_service.py` | Modified — Fixed `total_tokens` persistence |
+| `openhands/app_server/MLFLOW.md` | Updated — Documentation |
+
+---
+
+## Validation Steps
+
+1. **Deploy MLflow:** Start MLflow server and verify it's accessible
+2. **Configure OpenHands:** Set `MLFLOW_TRACKING_URI` environment variable
+3. **Start OpenHands:** Verify MLflow initialization appears in logs
+4. **Run a GUI conversation:** Create a conversation via the web UI
+5. **Verify MLflow run:** Check MLflow UI for a new run with logged metrics
+6. **Run an automation:** Create an automation-triggered conversation
+7. **Verify automation run:** Check MLflow UI for automation run with correct trigger parameter
+8. **Check metrics:** Verify token counts and cost reflect actual LLM usage
+9. **Test failure handling:** Stop MLflow server and verify conversations continue normally

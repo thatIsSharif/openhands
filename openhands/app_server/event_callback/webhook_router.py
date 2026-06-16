@@ -40,6 +40,10 @@ from openhands.app_server.integrations.provider import ProviderType
 from openhands.app_server.sandbox.sandbox_models import SandboxRecord
 from openhands.app_server.services.injector import InjectorState
 from openhands.app_server.services.jwt_service import JwtService
+from openhands.app_server.services.mlflow_tracker import (
+    get_mlflow_tracker,
+    is_mlflow_enabled,
+)
 from openhands.app_server.user.auth_user_context import AuthUserContext
 from openhands.app_server.user.specifiy_user_context import (
     ADMIN,
@@ -165,6 +169,19 @@ async def _track_conversation_terminal(
                 conversation_id=str(conversation_id),
                 llm_model=app_conversation_info.llm_model,
             )
+
+        # End MLflow run for errored conversations
+        if is_mlflow_enabled():
+            try:
+                get_mlflow_tracker().end_conversation(
+                    conversation_id,
+                    status='error',
+                    error=error_message or 'Unknown error',
+                )
+            except Exception:
+                _logger.exception(
+                    'MLflow end_conversation failed for %s', conversation_id
+                )
         return
 
     # BIZZ-05: conversation finished
@@ -181,6 +198,43 @@ async def _track_conversation_terminal(
         if app_conversation_info.trigger
         else None,
     )
+
+    # End MLflow run for completed conversations
+    if is_mlflow_enabled():
+        try:
+            # Log final metrics as a last snapshot before ending the run
+            # This ensures metrics are captured even if stats events were not emitted
+            metrics_dict = {}
+            if metrics:
+                metrics_dict['accumulated_cost'] = accumulated_cost
+                if metrics.accumulated_token_usage:
+                    metrics_dict['prompt_tokens'] = (
+                        metrics.accumulated_token_usage.prompt_tokens
+                    )
+                    metrics_dict['completion_tokens'] = (
+                        metrics.accumulated_token_usage.completion_tokens
+                    )
+                    metrics_dict['cache_read_tokens'] = (
+                        metrics.accumulated_token_usage.cache_read_tokens
+                    )
+                    metrics_dict['cache_write_tokens'] = (
+                        metrics.accumulated_token_usage.cache_write_tokens
+                    )
+                    metrics_dict['reasoning_tokens'] = (
+                        metrics.accumulated_token_usage.reasoning_tokens
+                    )
+
+            if metrics_dict:
+                get_mlflow_tracker().log_metrics(conversation_id, metrics_dict)
+
+            get_mlflow_tracker().end_conversation(
+                conversation_id,
+                status=exec_status.value,
+            )
+        except Exception:
+            _logger.exception(
+                'MLflow end_conversation failed for %s', conversation_id
+            )
 
 
 def detect_automation_trigger(
@@ -389,6 +443,22 @@ async def on_conversation_update(
                 )
             )
 
+        # Start MLflow run when a new conversation starts
+        if is_mlflow_enabled():
+            mlflow_tracker = get_mlflow_tracker()
+            mlflow_tracker.start_conversation(
+                conversation_id=conversation_info.id,
+                metadata={
+                    'repository': existing.selected_repository,
+                    'branch': existing.selected_branch,
+                    'trigger': trigger.value if trigger else None,
+                    'llm_model': llm_model,
+                    'title': existing.title
+                    or f'Conversation {conversation_info.id.hex}',
+                    'sandbox_id': sandbox_record.id,
+                },
+            )
+
     # Analytics: conversation created
     analytics = get_analytics_service()
     if analytics and sandbox_record.created_by_user_id:
@@ -426,6 +496,44 @@ async def on_event(
                 await app_conversation_info_service.process_stats_event(
                     event, conversation_id
                 )
+
+                # Log metrics to MLflow if enabled
+                if is_mlflow_enabled():
+                    try:
+                        mlflow_tracker = get_mlflow_tracker()
+                        event_value = event.value
+                        if isinstance(event_value, dict):
+                            usage_to_metrics = event_value.get('usage_to_metrics', {})
+                            agent_metrics = usage_to_metrics.get('agent', {})
+                            if agent_metrics:
+                                acc_usage = agent_metrics.get(
+                                    'accumulated_token_usage', {}
+                                ) or {}
+                                mlflow_tracker.log_metrics(
+                                    conversation_id,
+                                    {
+                                        'prompt_tokens': acc_usage.get('prompt_tokens'),
+                                        'completion_tokens': acc_usage.get(
+                                            'completion_tokens'
+                                        ),
+                                        'cache_read_tokens': acc_usage.get(
+                                            'cache_read_tokens'
+                                        ),
+                                        'cache_write_tokens': acc_usage.get(
+                                            'cache_write_tokens'
+                                        ),
+                                        'reasoning_tokens': acc_usage.get(
+                                            'reasoning_tokens'
+                                        ),
+                                        'accumulated_cost': agent_metrics.get(
+                                            'accumulated_cost'
+                                        ),
+                                    },
+                                )
+                    except Exception:
+                        _logger.exception(
+                            'MLflow stats logging failed for %s', conversation_id
+                        )
 
         # Reflect an agent-initiated LLM switch (via the built-in SwitchLLMTool)
         # on the conversation record. The tool emits a ``SwitchLLMObservation``
