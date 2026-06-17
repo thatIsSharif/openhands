@@ -363,7 +363,7 @@ class ExecutionStore:
 
     # --- Jira Project Repository operations ---
 
-    async def upsert_jira_project_repository(
+    async def create_jira_project_repository(
         self,
         jira_project_key: str,
         repository: str,
@@ -372,46 +372,48 @@ class ExecutionStore:
         custom_field_id: str | None = None,
         github_webhook_secret: str | None = None,
     ) -> JiraProjectRepositoryRecord:
-        """Create or update a Jira project → repository mapping."""
+        """Create a Jira project → repository mapping.
+
+        Multiple rows can share the same jira_project_key to support
+        projects that span multiple repositories.
+        """
+        mapping = StoredJiraProjectRepository(
+            jira_project_key=jira_project_key,
+            repository=repository,
+            owner=owner,
+            default_branch=default_branch,
+            custom_field_id=custom_field_id,
+            github_webhook_secret=github_webhook_secret,
+        )
+        async with self._get_session() as session:
+            session.add(mapping)
+            await session.commit()
+            await session.refresh(mapping)
+            return self._project_repo_record_from_model(mapping)
+
+    async def get_jira_project_repos_by_project_key(
+        self, jira_project_key: str
+    ) -> list[JiraProjectRepositoryRecord]:
+        """Get all project→repository mappings for a Jira project key."""
         async with self._get_session() as session:
             result = await session.execute(
                 select(StoredJiraProjectRepository).filter(
                     StoredJiraProjectRepository.jira_project_key == jira_project_key
                 )
             )
-            mapping = result.scalars().first()
+            mappings = result.scalars().all()
+            return [
+                self._project_repo_record_from_model(m) for m in mappings
+            ]
 
-            if mapping:
-                mapping.repository = repository
-                mapping.owner = owner
-                mapping.default_branch = default_branch
-                if custom_field_id is not None:
-                    mapping.custom_field_id = custom_field_id
-                if github_webhook_secret is not None:
-                    mapping.github_webhook_secret = github_webhook_secret
-            else:
-                mapping = StoredJiraProjectRepository(
-                    jira_project_key=jira_project_key,
-                    repository=repository,
-                    owner=owner,
-                    default_branch=default_branch,
-                    custom_field_id=custom_field_id,
-                    github_webhook_secret=github_webhook_secret,
-                )
-                session.add(mapping)
-
-            await session.commit()
-            await session.refresh(mapping)
-            return self._project_repo_record_from_model(mapping)
-
-    async def get_jira_project_repository(
-        self, jira_project_key: str
+    async def get_jira_project_repository_by_id(
+        self, record_id: int
     ) -> JiraProjectRepositoryRecord | None:
-        """Get a project→repository mapping by Jira project key."""
+        """Get a project→repository mapping by its record ID."""
         async with self._get_session() as session:
             result = await session.execute(
                 select(StoredJiraProjectRepository).filter(
-                    StoredJiraProjectRepository.jira_project_key == jira_project_key
+                    StoredJiraProjectRepository.id == record_id
                 )
             )
             mapping = result.scalars().first()
@@ -437,13 +439,13 @@ class ExecutionStore:
             ]
 
     async def delete_jira_project_repository(
-        self, jira_project_key: str
+        self, record_id: int
     ) -> bool:
-        """Delete a project→repository mapping. Returns True if deleted."""
+        """Delete a project→repository mapping by its record ID. Returns True if deleted."""
         async with self._get_session() as session:
             result = await session.execute(
                 select(StoredJiraProjectRepository).filter(
-                    StoredJiraProjectRepository.jira_project_key == jira_project_key
+                    StoredJiraProjectRepository.id == record_id
                 )
             )
             mapping = result.scalars().first()
