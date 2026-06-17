@@ -109,15 +109,17 @@ class StoredGitHubPullRequest(Base):
 class StoredJiraProjectRepository(Base):
     """Maps a Jira project key to a GitHub repository.
 
-    Also stores an optional custom_field_id that the resolver can check
-    on individual issues for a repository override.
+    Multiple rows can share the same jira_project_key to support
+    projects that span multiple repositories. This table is used for
+    administrative/reporting purposes; repository resolution for
+    automation comes directly from the Jira issue payload.
     """
 
     __tablename__ = 'jira_project_repositories'
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     jira_project_key: Mapped[str] = mapped_column(
-        String(50), unique=True, nullable=False, index=True
+        String(50), nullable=False, index=True
     )
     repository: Mapped[str] = mapped_column(String(255), nullable=False)
     owner: Mapped[str] = mapped_column(String(255), nullable=False)
