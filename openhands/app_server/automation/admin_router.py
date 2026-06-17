@@ -23,6 +23,7 @@ class CreateProjectRepoRequest(OpenHandsModel):
     jira_project_key: str
     repository: str
     owner: str
+    github_webhook_secret: str | None = None
     default_branch: str = 'main'
     custom_field_id: str | None = None
 
@@ -34,6 +35,7 @@ class ProjectRepoResponse(OpenHandsModel):
     jira_project_key: str = ''
     repository: str = ''
     owner: str = ''
+    github_webhook_secret: str | None = None
     default_branch: str = 'main'
     custom_field_id: str | None = None
 
@@ -66,6 +68,7 @@ async def create_project_repo(
         jira_project_key=request.jira_project_key,
         repository=request.repository,
         owner=request.owner,
+        github_webhook_secret=request.github_webhook_secret,
         default_branch=request.default_branch,
         custom_field_id=request.custom_field_id,
     )
@@ -74,6 +77,7 @@ async def create_project_repo(
         jira_project_key=record.jira_project_key,
         repository=record.repository,
         owner=record.owner,
+        github_webhook_secret=record.github_webhook_secret,
         default_branch=record.default_branch,
         custom_field_id=record.custom_field_id,
     )

@@ -33,7 +33,7 @@ from openhands.app_server.automation.openhands_client import (
 )
 from openhands.app_server.utils.logger import openhands_logger as logger
 
-router = APIRouter(prefix='/github/webhook', tags=['automation'])
+router = APIRouter(prefix='/git/github/webhook', tags=['automation'])
 
 
 class GitHubWebhookResponse(OpenHandsModel):

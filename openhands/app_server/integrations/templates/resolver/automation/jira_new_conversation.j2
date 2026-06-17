@@ -8,6 +8,7 @@ Type: {{ issue_type }}
 Priority: {{ priority }}
 
 ## Description
+
 {{ issue_description }}
 
 ## Instructions
@@ -17,4 +18,41 @@ Priority: {{ priority }}
 3. Implement the required changes following the project's coding standards.
 4. Commit your changes with clear commit messages referencing the issue key.
 5. Create a pull request with a descriptive title.
-6. The PR title should follow the format: [{{ issue_key }}] {{ issue_title }}
+6. The PR title should follow the format: `[{{ issue_key }}] {{ issue_title }}`.
+7. After creating the pull request, post a Jira comment on the issue summarizing the completed work.
+
+## Jira Comment Requirements
+
+The Jira comment should include:
+
+* A brief summary of the implementation.
+* Key files/components modified.
+* Any important design or architectural decisions.
+* Testing/validation performed.
+* Pull Request URL.
+
+Example format:
+
+### Implementation Summary
+
+* Implemented the requested functionality.
+* Updated relevant services, models, and tests.
+* Added validation and error handling where required.
+
+### Files Changed
+
+* file_a.py
+* file_b.py
+* file_c.py
+
+### Validation
+
+* Ran linting.
+* Executed relevant tests.
+* Verified expected behavior manually.
+
+### Pull Request
+
+PR: <pull_request_url>
+
+Post this comment to the Jira issue before finishing the task.

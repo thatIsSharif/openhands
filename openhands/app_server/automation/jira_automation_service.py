@@ -71,6 +71,7 @@ def extract_jira_issue_data(
     Returns None if issue_key is missing.
     """
     issue = payload.get('issue', {})
+    print(f"Extracting issue data from payload: {payload}")
     issue_key = issue.get('key')
     if not issue_key:
         return None
@@ -106,7 +107,8 @@ def extract_jira_project_key(payload: dict) -> str | None:
 
 
 _JIRA_REPOSITORY_FIELDS = [
-    'customfield_10010',  # Common repository field ID
+    "customfield_10171",
+    "repository",
 ]
 
 
@@ -305,19 +307,38 @@ class JiraAutomationService:
 
         # Build prompt from template with full context
         prompt = (
-            f'You are working on Jira issue {issue_key}. '
-            f'Title: {summary}\n\n'
-            f'Description:\n{issue_data["description"]}\n\n'
+            f'You are working on Jira issue {issue_key}.\n\n'
+            f'Issue Key: {issue_key}\n'
+            f'Title: {summary}\n'
             f'Issue Type: {issue_data["issue_type"]}\n'
             f'Priority: {issue_data["priority"]}\n'
             f'Reporter: {issue_data["reporter"]}\n\n'
-            f'Target repository: {repository_str}\n'
-            f'Default branch: {default_branch}\n\n'
-            f'Please create a branch named "{branch}" from '
-            f'{default_branch} and implement '
-            f'the required changes. Create a pull request against '
-            f'{default_branch} when done.'
-        )
+            f'Description:\n{issue_data["description"]}\n\n'
+            f'Target Repository: {repository_str}\n'
+            f'Default Branch: {default_branch}\n'
+            f'Working Branch: {branch}\n\n'
+            f'Requirements:\n'
+            f'1. Analyze the Jira issue and understand the requested changes.\n'
+            f'2. Create a branch named "{branch}" from "{default_branch}".\n'
+            f'3. Implement the required changes following the project coding standards.\n'
+            f'4. Run relevant tests, linting, or validation commands whenever applicable.\n'
+            f'5. Commit your changes with clear commit messages referencing the Jira issue key.\n'
+            f'6. Create a pull request targeting "{default_branch}".\n'
+            f'7. Include a clear description of the implementation in the pull request.\n'
+            f'8. After creating the pull request, post a comment on the Jira issue using the available Jira tools.\n\n'
+            f'The Jira comment must contain:\n'
+            f'- Summary of changes implemented\n'
+            f'- Key files/components modified\n'
+            f'- Test and validation results\n'
+            f'- Pull request URL\n'
+            f'- Any important notes or follow-up items\n\n'
+            f'The Jira comment is a required final step and must be posted before the task is considered complete.\n\n'
+            f'Do not mark the task complete until:\n'
+            f'- Code changes are committed\n'
+            f'- Pull request is created\n'
+            f'- Jira comment has been successfully posted\n'
+            )
+
 
         # Create OpenHands conversation
         conversation_id = await self.openhands_client.create_conversation(
