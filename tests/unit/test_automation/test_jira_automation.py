@@ -5,9 +5,11 @@ import hmac
 import json
 
 from openhands.app_server.automation.jira_automation_service import (
+    _validate_repository_format,
     compute_jira_event_id,
     extract_jira_issue_data,
     extract_jira_project_key,
+    extract_jira_repository,
     generate_jira_branch_name,
     verify_jira_signature,
 )
@@ -186,6 +188,89 @@ class TestExtractJiraProjectKey:
     def test_returns_none_when_missing(self):
         assert extract_jira_project_key({}) is None
         assert extract_jira_project_key({'issue': {}}) is None
-        assert extract_jira_project_key(
-            {'issue': {'fields': {}}}
-        ) is None
+        assert extract_jira_project_key({'issue': {'fields': {}}}) is None
+
+
+class TestExtractJiraRepository:
+    def test_extracts_from_customfield(self):
+        """Extracts repository from the configured custom field."""
+        payload = {
+            'issue': {
+                'fields': {
+                    'summary': 'Test issue',
+                    'customfield_10010': 'thatIsSharif/workflow-engine',
+                },
+            },
+        }
+        result = extract_jira_repository(payload)
+        assert result == 'thatIsSharif/workflow-engine'
+
+    def test_extracts_dict_value(self):
+        """Extracts repository from a dict-style custom field value."""
+        payload = {
+            'issue': {
+                'fields': {
+                    'customfield_10010': {'value': 'thatIsSharif/dsd-frontend'},
+                },
+            },
+        }
+        result = extract_jira_repository(payload)
+        assert result == 'thatIsSharif/dsd-frontend'
+
+    def test_extracts_dict_with_name(self):
+        """Extracts repository from a dict with 'name' key."""
+        payload = {
+            'issue': {
+                'fields': {
+                    'customfield_10010': {'name': 'thatIsSharif/devops'},
+                },
+            },
+        }
+        result = extract_jira_repository(payload)
+        assert result == 'thatIsSharif/devops'
+
+    def test_returns_none_when_missing(self):
+        """Returns None when no repository field is present."""
+        payload = {
+            'issue': {
+                'fields': {
+                    'summary': 'Test issue',
+                },
+            },
+        }
+        assert extract_jira_repository(payload) is None
+
+    def test_returns_none_when_null(self):
+        """Returns None when the repository field is null."""
+        payload = {
+            'issue': {
+                'fields': {
+                    'customfield_10010': None,
+                },
+            },
+        }
+        assert extract_jira_repository(payload) is None
+
+    def test_returns_none_for_empty_payload(self):
+        """Returns None for empty payload."""
+        assert extract_jira_repository({}) is None
+
+
+class TestValidateRepositoryFormat:
+    def test_valid_format(self):
+        assert _validate_repository_format('owner/repo') is True
+
+    def test_valid_format_with_multi_part(self):
+        assert _validate_repository_format('thatIsSharif/workflow-engine') is True
+
+    def test_invalid_no_slash(self):
+        assert _validate_repository_format('justrepo') is False
+
+    def test_invalid_empty_owner(self):
+        assert _validate_repository_format('/repo') is False
+
+    def test_invalid_empty_repo(self):
+        assert _validate_repository_format('owner/') is False
+
+    def test_invalid_empty_string(self):
+        assert _validate_repository_format('') is False
