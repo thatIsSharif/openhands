@@ -4,6 +4,15 @@ import warnings
 
 from fastapi.routing import Mount
 
+# ── LiteLLM proxy integration ──────────────────────────────────────────────
+# Route all ``openhands/``-prefix model traffic through the local LiteLLM
+# proxy (started during the app lifespan).  This also sets the module-level
+# ``LITE_LLM_API_URL`` constant in ``settings_router`` so that every
+# downstream caller picks up the local proxy URL automatically.
+# See: openhands/app_server/services/litellm_proxy_manager.py
+#      openhands/app_server/app_lifespan/oss_app_lifespan_service.py
+os.environ.setdefault('LITE_LLM_API_URL', 'http://localhost:4000')
+
 with warnings.catch_warnings():
     warnings.simplefilter('ignore')
 

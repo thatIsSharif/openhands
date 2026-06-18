@@ -1,3 +1,4 @@
+import os
 import warnings
 
 from pydantic import BaseModel
@@ -139,6 +140,13 @@ def resolve_llm_base_url(
     if not model:
         return None
     if is_openhands_model(model):
+        # Check for a runtime env-var override first so that a dynamically
+        # started LiteLLM proxy (litellm_proxy_manager) is picked up even
+        # when the caller's ``managed_proxy_url`` was captured at import
+        # time from a module-level constant.
+        env_override = os.environ.get('LITE_LLM_API_URL')
+        if env_override is not None:
+            return env_override
         return managed_proxy_url
     try:
         return get_provider_api_base(model)

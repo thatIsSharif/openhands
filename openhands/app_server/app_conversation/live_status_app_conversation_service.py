@@ -1031,12 +1031,34 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
             user.agent_settings.llm.base_url,
             provider_base_url=self.openhands_provider_base_url,
         )
+        # If a local LiteLLM proxy is running (set by litellm_proxy_manager),
+        # route openhands/ models through it so LLM traffic is observable
+        # in Langfuse.
+        import os as _os
+
+        managed_proxy = _os.environ.get('LITE_LLM_API_URL')
+        api_key = user.agent_settings.llm.api_key
+        if (
+            managed_proxy
+            and model
+            and model.startswith('openhands/')
+            and not user.agent_settings.llm.base_url
+        ):
+            base_url = managed_proxy
+            # If the user hasn't configured a custom API key, inject the
+            # proxy master key so requests aren't rejected by the proxy.
+            if not api_key:
+                proxy_key = _os.environ.get('LITE_LLM_API_KEY')
+                if proxy_key:
+                    from pydantic import SecretStr
+
+                    api_key = SecretStr(proxy_key)
 
         return user.agent_settings.llm.model_copy(
             update={
                 'model': model,
                 'base_url': base_url,
-                'api_key': user.agent_settings.llm.api_key,
+                'api_key': api_key,
                 'usage_id': 'agent',
             }
         )

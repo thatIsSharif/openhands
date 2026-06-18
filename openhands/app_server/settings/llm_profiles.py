@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from typing import Any, Final
 
 from pydantic import (
@@ -47,6 +48,10 @@ def resolve_profile_llm(
     the profile carries no real key. Managed profiles persist a masked key, so
     without the fallback the agent server would call the LiteLLM proxy with no
     credentials; BYOR profiles keep their own key (the fallback is skipped).
+
+    As a last resort, the ``LITE_LLM_API_KEY`` env var (set automatically by
+    ``litellm_proxy_manager.configure_openhands_for_proxy``) is used so that a
+    locally-running LiteLLM proxy is never called without authentication.
     """
     resolved = profile_llm.model_copy(
         update={
@@ -57,8 +62,15 @@ def resolve_profile_llm(
             )
         }
     )
-    if not has_real_api_key(resolved.api_key) and has_real_api_key(fallback_api_key):
-        resolved = resolved.model_copy(update={'api_key': fallback_api_key})
+    if has_real_api_key(resolved.api_key):
+        return resolved
+    if has_real_api_key(fallback_api_key):
+        return resolved.model_copy(update={'api_key': fallback_api_key})
+    proxy_key = os.environ.get('LITE_LLM_API_KEY')
+    if proxy_key:
+        from pydantic import SecretStr
+
+        return resolved.model_copy(update={'api_key': SecretStr(proxy_key)})
     return resolved
 
 
