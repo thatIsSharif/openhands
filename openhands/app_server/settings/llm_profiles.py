@@ -49,9 +49,9 @@ def resolve_profile_llm(
     without the fallback the agent server would call the LiteLLM proxy with no
     credentials; BYOR profiles keep their own key (the fallback is skipped).
 
-    As a last resort, the ``LITE_LLM_API_KEY`` env var (set automatically by
-    ``litellm_proxy_manager.configure_openhands_for_proxy``) is used so that a
-    locally-running LiteLLM proxy is never called without authentication.
+    When a local LiteLLM proxy is running (``LITE_LLM_API_URL`` set), the
+    profile's ``base_url`` and ``api_key`` are overridden so that all LLM
+    traffic is observable in Langfuse, regardless of model prefix.
     """
     resolved = profile_llm.model_copy(
         update={
@@ -62,6 +62,24 @@ def resolve_profile_llm(
             )
         }
     )
+
+    # Runtime proxy override — applies to ALL models, not just openhands/.
+    proxy_base = os.environ.get('LITE_LLM_API_URL')
+    if proxy_base:
+        from openhands.app_server.utils.docker_utils import (
+            replace_localhost_hostname_for_docker,
+        )
+
+        resolved = resolved.model_copy(
+            update={'base_url': replace_localhost_hostname_for_docker(proxy_base)}
+        )
+        proxy_key = os.environ.get('LITE_LLM_API_KEY')
+        if proxy_key:
+            from pydantic import SecretStr
+
+            resolved = resolved.model_copy(update={'api_key': SecretStr(proxy_key)})
+        return resolved
+
     if has_real_api_key(resolved.api_key):
         return resolved
     if has_real_api_key(fallback_api_key):

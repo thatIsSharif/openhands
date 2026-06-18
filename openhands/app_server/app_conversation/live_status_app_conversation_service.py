@@ -1013,13 +1013,13 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
         ``reasoning_effort``, ``extended_thinking_budget``, ``drop_params``)
         are preserved so that they reach the agent-server unchanged.
 
-        Args:
-            user: User information containing LLM preferences
-            llm_model: Optional specific model to use, falls back to user default
-
-        Returns:
-            Configured LLM instance
+        When a local LiteLLM proxy is running (signalled by the
+        ``LITE_LLM_API_URL`` env var), the resolved ``base_url`` and
+        ``api_key`` are overridden so that ALL LLM traffic — regardless of
+        model prefix — is observable in Langfuse.
         """
+        import os as _os
+
         model: str = (
             llm_model
             or user.agent_settings.llm.model
@@ -1032,28 +1032,23 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
             provider_base_url=self.openhands_provider_base_url,
         )
 
-        # If a local LiteLLM proxy is running (set by litellm_proxy_manager),
-        # route openhands/ models through it so LLM traffic is observable
-        # in Langfuse.
-        import os as _os
-
-        managed_proxy = _os.environ.get('LITE_LLM_API_URL')
         api_key = user.agent_settings.llm.api_key
-        if (
-            managed_proxy
-            and model
-            and model.startswith('openhands/')
-            and not user.agent_settings.llm.base_url
-        ):
-            base_url = managed_proxy
-            # If the user hasn't configured a custom API key, inject the
-            # proxy master key so requests aren't rejected by the proxy.
-            if not api_key:
-                proxy_key = _os.environ.get('LITE_LLM_API_KEY')
-                if proxy_key:
-                    from pydantic import SecretStr
 
-                    api_key = SecretStr(proxy_key)
+        # If a local LiteLLM proxy is running, route ALL model traffic
+        # through it so that LLM calls are observable in Langfuse.
+        managed_proxy = _os.environ.get('LITE_LLM_API_URL')
+        if managed_proxy:
+            from openhands.app_server.utils.docker_utils import (
+                replace_localhost_hostname_for_docker,
+            )
+
+            base_url = replace_localhost_hostname_for_docker(managed_proxy)
+            # The proxy requires the master key for API auth.
+            proxy_key = _os.environ.get('LITE_LLM_API_KEY')
+            if proxy_key:
+                from pydantic import SecretStr as _SecretStr
+
+                api_key = _SecretStr(proxy_key)
 
         return user.agent_settings.llm.model_copy(
             update={
