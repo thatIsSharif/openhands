@@ -63,6 +63,12 @@ LANGFUSE_PROJECT = "my-llm-project"
 LITELLM_PROXY_HOST = "0.0.0.0"
 LITELLM_PROXY_PORT = 4000
 
+# Master key for LiteLLM proxy API auth.  Clients must send this as the
+# ``Authorization: Bearer`` header when calling proxy API endpoints
+# (health-check endpoints are exempt).  OpenHands uses this same value
+# as the LLM ``api_key`` when routing through the proxy.
+LITELLM_PROXY_MASTER_KEY = "sk-l0g79haCLaZaGXpwJ6rwWautjihHrGyngLXhgkQoPYXX93DKXzfUNwza2TFEW5xs"
+
 logger = logging.getLogger(__name__)
 _DEBUG_PREFIX = "[LITELLM-LANGFUSE]"
 
@@ -98,36 +104,16 @@ DEFAULT_PROXY_CONFIG_YAML = r"""# ==============================================
 # ============================================================================
 
 # ── Model routing ──────────────────────────────────────────────────────────
-# These entries route common model patterns. Add more as needed.
 model_list:
-  - model_name: "gpt-*"
+  # OpenCode Zen model — the primary model used by this integration.
+  - model_name: "deepseek-v4-flash-free"
     litellm_params:
-      model: "gpt-*"
-      api_key: os.environ/OPENAI_API_KEY
+      model: "openai/deepseek-v4-flash-free"
+      api_key: "sk-l0g79haCLaZaGXpwJ6rwWautjihHrGyngLXhgkQoPYXX93DKXzfUNwza2TFEW5xs"
+      api_base: "https://opencode.ai/zen/v1"
 
-  - model_name: "o1-*"
-    litellm_params:
-      model: "o1-*"
-      api_key: os.environ/OPENAI_API_KEY
-
-  - model_name: "o3-*"
-    litellm_params:
-      model: "o3-*"
-      api_key: os.environ/OPENAI_API_KEY
-
-  - model_name: "claude-*"
-    litellm_params:
-      model: "claude-*-*"
-      api_key: os.environ/ANTHROPIC_API_KEY
-
-  - model_name: "gemini-*"
-    litellm_params:
-      model: "gemini/*"
-      api_key: os.environ/GEMINI_API_KEY
-
-  # Passthrough catch-all — forwards the request to the provider inferred
-  # from the model name. Works for any model/providers that LiteLLM supports.
-  # When using this, set the API key for each provider via env vars.
+  # Passthrough catch-all — forwards any other request to the provider
+  # inferred from the model name.
   - model_name: "*"
     litellm_params:
       model: "*"
@@ -149,9 +135,10 @@ litellm_settings:
 
 # ── General settings ───────────────────────────────────────────────────────
 general_settings:
-  # Master key is optional — if set, all requests must include this key
-  # as the Authorization: Bearer <key> header.
-  # master_key: os.environ/LITELLM_MASTER_KEY
+  # Master key — required by LiteLLM proxy for API auth.
+  # Clients must send ``Authorization: Bearer <master_key>`` when calling
+  # the proxy. Health-check endpoints (``/health/*``) are exempt.
+  master_key: "sk-l0g79haCLaZaGXpwJ6rwWautjihHrGyngLXhgkQoPYXX93DKXzfUNwza2TFEW5xs"
   pass_through: true
 """
 
@@ -223,7 +210,7 @@ class LangfuseLiteLLMIntegration:
 
     def start(
         self,
-        timeout: float = 30.0,
+        timeout: float = 60.0,
         extra_models: list[dict] | None = None,
     ) -> bool:
         """Start the LiteLLM Proxy subprocess.
@@ -244,6 +231,9 @@ class LangfuseLiteLLMIntegration:
 
             if not self._check_installation():
                 return False
+
+            # Kill any stale proxy on the target port before starting
+            self._ensure_port_free()
 
             config_path = self._write_config(extra_models)
             if config_path is None:
@@ -313,6 +303,8 @@ class LangfuseLiteLLMIntegration:
                 timeout,
                 self._log_file.name if self._log_file else "(none)",
             )
+            # Dump the tail of the proxy log to aid debugging
+            self._dump_proxy_log()
             self.stop()
             return False
 
@@ -399,6 +391,92 @@ class LangfuseLiteLLMIntegration:
             _error("Import error: %s", exc)
             return False
 
+    @staticmethod
+    def _ensure_port_free() -> None:
+        """Kill any existing process listening on the target proxy port.
+
+        This prevents failures when uvicorn reloads and the old proxy
+        subprocess was orphaned (still holding the port).
+        """
+        import socket
+
+        host = LITELLM_PROXY_HOST
+        port = LITELLM_PROXY_PORT
+
+        # Quick check: is the port already in use?
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            s.settimeout(1)
+            result = s.connect_ex((host, port))
+            s.close()
+            if result != 0:
+                return  # port is free
+        except Exception:
+            s.close()
+            return
+
+        # Port is occupied — try to find and kill the process
+        _warn("Port %d is already in use — attempting to free it", port)
+        try:
+            import psutil
+
+            for conn in psutil.net_connections():
+                if conn.laddr.port == port and conn.status == "LISTEN":
+                    pid = conn.pid
+                    if pid:
+                        _info("Killing process %d holding port %d", pid, port)
+                        proc = psutil.Process(pid)
+                        proc.terminate()
+                        proc.wait(timeout=5)
+            return
+        except ImportError:
+            # psutil not available — fall back to fuser
+            pass
+        except Exception:
+            pass
+
+        # Fallback: try fuser
+        try:
+            import subprocess as _subprocess
+
+            _subprocess.run(
+                ["fuser", "-k", f"{port}/tcp"],
+                capture_output=True,
+                timeout=5,
+            )
+        except Exception:
+            _warn(
+                "Could not free port %d automatically. "
+                "Please ensure no other process is using it.",
+                port,
+            )
+
+    def _dump_proxy_log(self) -> None:
+        """Log the tail of the proxy subprocess log for debugging.
+
+        Called when startup fails to give the user immediate visibility
+        into what went wrong without requiring a separate ``cat``.
+        """
+        if self._log_file is None:
+            return
+        log_path = self._log_file.name
+        try:
+            import subprocess as _subprocess
+
+            result = _subprocess.run(
+                ["tail", "-30", log_path],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if result.stdout:
+                _error("--- Last 30 lines of proxy log (%s) ---", log_path)
+                for line in result.stdout.rstrip().splitlines():
+                    _error("  | %s", line)
+                _error("--- End of proxy log ---")
+        except Exception as exc:
+            _error("Could not read proxy log %s: %s", log_path, exc)
+
     def _write_config(self, extra_models: list[dict] | None = None) -> Path | None:
         """Write the proxy config YAML to a temporary file and return its path."""
         try:
@@ -442,13 +520,22 @@ class LangfuseLiteLLMIntegration:
         env.setdefault("LITELLM_LOG", "DEBUG")
         return env
 
-    def _wait_ready(self, timeout: float = 30.0) -> bool:
+    def _wait_ready(self, timeout: float = 60.0) -> bool:
         """Poll the proxy health endpoint until it responds or times out."""
         import urllib.request
         import urllib.error
+        import socket as _socket
 
-        health_url = f"{self.proxy_url}/health/ready"
         deadline = time.monotonic() + timeout
+
+        # Try multiple endpoints — some LiteLLM versions respond on different
+        # paths before they report full readiness.
+        probe_urls = [
+            f"{self.proxy_url}/health/liveliness",
+            f"{self.proxy_url}/health/ready",
+            f"{self.proxy_url}/health",
+            f"{self.proxy_url}/v1/models",
+        ]
 
         _info("Waiting for proxy to be ready (timeout=%.0fs)...", timeout)
         while time.monotonic() < deadline:
@@ -460,22 +547,25 @@ class LangfuseLiteLLMIntegration:
                 )
                 return False
 
+            # Try connecting to the port first (cheapest check)
             try:
-                req = urllib.request.Request(health_url)
-                with urllib.request.urlopen(req, timeout=2) as resp:
-                    if resp.status == 200:
-                        return True
-            except (urllib.error.URLError, ConnectionRefusedError, OSError):
-                pass
+                s = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+                s.settimeout(1)
+                s.connect((self.host if self.host != "0.0.0.0" else "127.0.0.1", self.port))
+                s.close()
+            except Exception:
+                time.sleep(0.5)
+                continue
 
-            # Also try the base chat completions endpoint
-            try:
-                req = urllib.request.Request(f"{self.proxy_url}/v1/models")
-                with urllib.request.urlopen(req, timeout=2) as resp:
-                    if resp.status == 200:
-                        return True
-            except (urllib.error.URLError, ConnectionRefusedError, OSError):
-                pass
+            # Port is accepting connections — try the probe endpoints
+            for url in probe_urls:
+                try:
+                    req = urllib.request.Request(url)
+                    with urllib.request.urlopen(req, timeout=2) as resp:
+                        if resp.status in (200, 302, 301):
+                            return True
+                except (urllib.error.URLError, ConnectionRefusedError, OSError):
+                    pass
 
             time.sleep(0.5)
 
@@ -508,14 +598,18 @@ def _basic_auth_token(public_key: str, secret_key: str) -> str:
 def configure_openhands_for_proxy(proxy_url: str = f"http://localhost:{LITELLM_PROXY_PORT}") -> None:
     """Configure OpenHands to route all LLM calls through the given proxy.
 
-    Sets the ``LITE_LLM_API_URL`` environment variable which instructs the
-    OpenHands LLM client to use the proxy as the base URL for all requests
-    opened via ``openhands/`` models.
+    Sets environment variables that instruct the OpenHands LLM client to
+    route ``openhands/``-prefixed model traffic through the proxy.
 
-    For non-``openhands/`` models, you must set ``base_url`` in the LLM
-    settings to the proxy URL.
+    * ``LITE_LLM_API_URL`` — proxy base URL (read by ``settings_router``).
+    * ``LITE_LLM_API_KEY`` — proxy master key (read by ``_post_merge_llm_fixups``
+      for LLM configs that route through the proxy and have no explicit key).
+
+    For non-``openhands/`` models, you must set ``base_url`` and ``api_key``
+    in the LLM settings to point at the proxy.
     """
     os.environ["LITE_LLM_API_URL"] = proxy_url
+    os.environ["LITE_LLM_API_KEY"] = LITELLM_PROXY_MASTER_KEY
     _info("LITE_LLM_API_URL set to %s — OpenHands will route through proxy", proxy_url)
 
 
