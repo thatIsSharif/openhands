@@ -366,6 +366,7 @@ async def on_conversation_update(
         # Store merged tags (includes automation context, skills, etc.)
         tags=merged_tags,
     )
+
     await app_conversation_info_service.save_app_conversation_info(
         app_conversation_info
     )
@@ -446,6 +447,7 @@ async def on_event(
             info = await app_conversation_info_service.get_app_conversation_info(
                 conversation_id
             )
+            print("Switched LLM model detected*************************************************************************:", switched_model)
             if info is not None and info.llm_model != switched_model:
                 info.llm_model = switched_model
                 await app_conversation_info_service.save_app_conversation_info(info)

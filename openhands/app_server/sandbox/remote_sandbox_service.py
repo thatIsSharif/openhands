@@ -808,6 +808,7 @@ async def refresh_conversation(
 
         # Phase 2: Write - acquire DB session and save conversation info
         # (short-lived session, no network I/O held)
+        print(f"Saving conversation info for {app_conversation_info}")
         async with (
             get_db_session(state) as _db_session,
             get_app_conversation_info_service(state) as app_conversation_info_service,

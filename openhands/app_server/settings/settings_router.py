@@ -70,10 +70,6 @@ def _post_merge_llm_fixups(settings: Settings) -> None:
     Delegates the empty-string → cleared and provider-default inference
     rules to :func:`openhands.app_server.utils.llm.resolve_llm_base_url` so the
     personal-save and enterprise org-defaults paths stay in lockstep.
-
-    When the resolved ``base_url`` points at the LiteLLM proxy and no
-    explicit ``api_key`` was provided, inject the proxy master key so
-    that the proxy does not reject the request with ``401``.
     """
     if not isinstance(settings.agent_settings, OpenHandsAgentSettings):
         return
@@ -83,15 +79,6 @@ def _post_merge_llm_fixups(settings: Settings) -> None:
         base_url=llm.base_url,
         managed_proxy_url=LITE_LLM_API_URL,
     )
-
-    # If the LLM is now pointed at the LiteLLM proxy and the user hasn't
-    # set a custom API key, inject the proxy master key so that the proxy
-    # accepts the request.
-    proxy_api_key = os.environ.get('LITE_LLM_API_KEY')
-    if proxy_api_key and not has_real_api_key(llm.api_key):
-        from pydantic import SecretStr
-
-        llm.api_key = SecretStr(proxy_api_key)
 
 
 # NOTE: We use response_model=None for endpoints that return JSONResponse directly.

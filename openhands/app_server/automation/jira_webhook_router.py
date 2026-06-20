@@ -19,6 +19,12 @@ from openhands.app_server.automation.jira_automation_service import (
 )
 from openhands.app_server.utils.logger import openhands_logger as logger
 
+from pydantic import BaseModel
+from openhands.app_server.utils.jira import add_comment
+class JiraCommentRequest(BaseModel):
+    issue_key: str
+    body: str
+
 router = APIRouter(prefix='/jira/start', tags=['automation'])
 
 
@@ -90,11 +96,8 @@ async def _process_jira_event(
     payload: dict,
     request: Request,
 ) -> None:
-    """Process a Jira webhook event in the background.
+    """Process a Jira webhook event in the background."""
 
-    Creates an execution and OpenHands conversation
-    outside of the webhook request-response cycle.
-    """
     from openhands.app_server.automation.execution_service import (
         ExecutionService,
     )
@@ -107,10 +110,48 @@ async def _process_jira_event(
     )
 
     try:
+        TARGET_ACCOUNT_ID = (
+            "712020:31da0b8e-ed93-4098-8ddc-582475da756c"
+        )
+
+        # Only process assignment events
+        if payload.get("issue_event_type_name") != "issue_assigned":
+            logger.info(
+                "[Automation] Ignoring Jira event: not an assignment event"
+            )
+            return
+
+        assignee_change = next(
+            (
+                item
+                for item in payload.get("changelog", {}).get("items", [])
+                if item.get("field") == "assignee"
+            ),
+            None,
+        )
+
+        if not assignee_change:
+            logger.info(
+                "[Automation] Ignoring Jira event: no assignee change found"
+            )
+            return
+
+        if assignee_change.get("to") != TARGET_ACCOUNT_ID:
+            logger.info(
+                "[Automation] Ignoring Jira event: not assigned to target user "
+                f"(to={assignee_change.get('to')})"
+            )
+            return
+
+        logger.info(
+            "[Automation] Issue assigned to target user, starting automation"
+        )
+
         # Build services using OSS DI
         store = ExecutionStore()
         execution_service = ExecutionService(store=store)
         openhands_client = OpenHandsClient()
+
         jira_service = JiraAutomationService(
             execution_service=execution_service,
             openhands_client=openhands_client,
@@ -126,6 +167,15 @@ async def _process_jira_event(
             f'[Automation] Jira event processed: {result.get("status")} '
             f'(execution: {result.get("execution_id", "N/A")})',
         )
+
     except Exception:
         import traceback
+
         logger.error(traceback.format_exc())
+
+@router.post('/comment')
+async def post_jira_comment(req: JiraCommentRequest) -> dict:
+    """Post a comment to Jira. LLM calls this — code handles the Jira API."""
+
+    result = add_comment(req.issue_key, req.body)
+    return {"status": "ok", "comment_id": result["id"]}

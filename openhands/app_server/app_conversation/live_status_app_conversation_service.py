@@ -404,6 +404,7 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
                 pr_number=request.pr_number,
                 parent_conversation_id=request.parent_conversation_id,
             )
+
             await self.app_conversation_info_service.save_app_conversation_info(
                 app_conversation_info
             )
@@ -1012,13 +1013,7 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
         and usage ID).  All other user-configured fields (e.g.
         ``reasoning_effort``, ``extended_thinking_budget``, ``drop_params``)
         are preserved so that they reach the agent-server unchanged.
-
-        When a local LiteLLM proxy is running (signalled by the
-        ``LITE_LLM_API_URL`` env var), the resolved ``base_url`` and
-        ``api_key`` are overridden so that ALL LLM traffic — regardless of
-        model prefix — is observable in Langfuse.
         """
-        import os as _os
 
         model: str = (
             llm_model
@@ -1032,29 +1027,12 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
             provider_base_url=self.openhands_provider_base_url,
         )
 
-        api_key = user.agent_settings.llm.api_key
-
-        # If a local LiteLLM proxy is running, route ALL model traffic
-        # through it so that LLM calls are observable in Langfuse.
-        managed_proxy = _os.environ.get('LITE_LLM_API_URL')
-        if managed_proxy:
-            from openhands.app_server.utils.docker_utils import (
-                replace_localhost_hostname_for_docker,
-            )
-
-            base_url = replace_localhost_hostname_for_docker(managed_proxy)
-            # The proxy requires the master key for API auth.
-            proxy_key = _os.environ.get('LITE_LLM_API_KEY')
-            if proxy_key:
-                from pydantic import SecretStr as _SecretStr
-
-                api_key = _SecretStr(proxy_key)
 
         return user.agent_settings.llm.model_copy(
             update={
                 'model': model,
                 'base_url': base_url,
-                'api_key': api_key,
+                'api_key': user.agent_settings.llm.api_key,
                 'usage_id': 'agent',
             }
         )
