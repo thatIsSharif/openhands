@@ -19,6 +19,7 @@ from .execution_models import (
     validate_transition,
 )
 from .execution_store import ExecutionStore
+from .langfuse_service import LangfuseService
 
 
 @dataclass
@@ -125,7 +126,7 @@ class ExecutionService:
         )
 
         if updated:
-            target_str = target.value if hasattr(target, "value") else target
+            target_str = target.value if hasattr(target, 'value') else target
             logger.info(
                 f'[Automation] Execution {execution_id} '
                 f'→ {target_str}',
@@ -137,8 +138,6 @@ class ExecutionService:
 
         # Create Langfuse trace when execution starts running
         if target == ExecutionState.RUNNING and updated:
-            from .langfuse_service import LangfuseService
-
             langfuse = LangfuseService()
             await langfuse.start_trace(updated)
 

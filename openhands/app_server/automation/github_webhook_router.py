@@ -120,7 +120,6 @@ async def handle_github_webhook(
         if mapping
         else None
     )
-    print(f'GitHub webhook secret for {owner}/{repository}: {github_secret}')
     if github_secret:
         signature = request.headers.get('X-Hub-Signature-256')
 
@@ -150,17 +149,23 @@ async def handle_github_webhook(
     )
 
 
-async def _process_github_review_comment(
+async def _run_github_background(
+    handler_name: str,
+    handler_method: str,
     payload: dict,
     delivery_id: str,
     request: Request,
 ) -> None:
-    """Process a pull_request_review_comment event in the background.
+    """Run a GitHub automation handler in the background.
 
-    Creates a new execution and OpenHands conversation
-    outside of the webhook request-response cycle.
+    Args:
+        handler_name: Human-readable name for logging.
+        handler_method: Attribute name of the method to call on
+            ``GitHubAutomationService`` (e.g. ``"process_review_submitted"``).
+        payload: The webhook payload.
+        delivery_id: The ``X-GitHub-Delivery`` header value.
+        request: The incoming FastAPI request.
     """
-
     try:
         store = ExecutionStore()
         execution_service = ExecutionService(store=store)
@@ -170,7 +175,8 @@ async def _process_github_review_comment(
             openhands_client=openhands_client,
         )
 
-        result = await github_service.process_review_comment(
+        method = getattr(github_service, handler_method)
+        result = await method(
             payload=payload,
             state=request.state,
             request=request,
@@ -178,13 +184,29 @@ async def _process_github_review_comment(
         )
 
         logger.info(
-            f'[Automation] GitHub event processed: {result.get("status")} '
+            f'[Automation] GitHub {handler_name} processed: '
+            f'{result.get("status")} '
             f'(execution: {result.get("execution_id", "N/A")})',
         )
     except Exception as e:
         logger.error(
-            f'[Automation] GitHub background processing failed: {e}'
+            f'[Automation] GitHub {handler_name} processing failed: {e}'
         )
+
+
+async def _process_github_review_comment(
+    payload: dict,
+    delivery_id: str,
+    request: Request,
+) -> None:
+    """Process a pull_request_review_comment event in the background."""
+    await _run_github_background(
+        'review_comment',
+        'process_review_comment',
+        payload,
+        delivery_id,
+        request,
+    )
 
 
 async def _process_github_review_submitted(
@@ -192,34 +214,11 @@ async def _process_github_review_submitted(
     delivery_id: str,
     request: Request,
 ) -> None:
-    """Process a pull_request_review (submitted) event in the background.
-
-    Creates a new execution and OpenHands conversation
-    outside of the webhook request-response cycle.
-    """
-
-    try:
-        store = ExecutionStore()
-        execution_service = ExecutionService(store=store)
-        openhands_client = OpenHandsClient()
-        github_service = GitHubAutomationService(
-            execution_service=execution_service,
-            openhands_client=openhands_client,
-        )
-
-        result = await github_service.process_review_submitted(
-            payload=payload,
-            state=request.state,
-            request=request,
-            delivery_id=delivery_id,
-        )
-
-        logger.info(
-            f'[Automation] GitHub review submitted processed: '
-            f'{result.get("status")} '
-            f'(execution: {result.get("execution_id", "N/A")})',
-        )
-    except Exception as e:
-        logger.error(
-            f'[Automation] GitHub review submitted processing failed: {e}'
-        )
+    """Process a pull_request_review (submitted) event in the background."""
+    await _run_github_background(
+        'review_submitted',
+        'process_review_submitted',
+        payload,
+        delivery_id,
+        request,
+    )

@@ -24,13 +24,11 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from .execution_models import ExecutionRecord, ExecutionState
 
 from openhands.app_server.utils.logger import openhands_logger as logger
 
 from .correlation import build_log_context
-from .execution_models import ExecutionRecord
+from .execution_models import ExecutionRecord, ExecutionState
 
 # Sentinel for "not configured" state
 _LANGFUSE_AVAILABLE: bool | None = None

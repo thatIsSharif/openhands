@@ -6,7 +6,6 @@ Hooks into the EventCallbackProcessor system to react to terminal states.
 
 from __future__ import annotations
 
-import logging
 from typing import ClassVar
 from uuid import UUID
 
@@ -20,16 +19,15 @@ from openhands.app_server.event_callback.event_callback_result_models import (
     EventCallbackResult,
     EventCallbackResultStatus,
 )
+from openhands.app_server.utils.logger import openhands_logger as logger
 from openhands.sdk import Event
-from openhands.sdk.event.conversation_state import ConversationStateUpdateEvent
 from openhands.sdk.conversation import ConversationExecutionStatus
+from openhands.sdk.event.conversation_state import ConversationStateUpdateEvent
 
 from .correlation import build_log_context
 from .execution_models import ExecutionState
 from .execution_store import ExecutionStore
 from .langfuse_service import LangfuseService
-
-_logger = logging.getLogger(__name__)
 
 
 class AutomationEventCallbackProcessor(EventCallbackProcessor):
@@ -70,7 +68,7 @@ class AutomationEventCallbackProcessor(EventCallbackProcessor):
             str(conversation_id)
         )
         if not record:
-            _logger.info(
+            logger.info(
                 '[Automation] No execution record found for '
                 f'conversation {conversation_id} (may not be automation)'
             )
@@ -88,7 +86,7 @@ class AutomationEventCallbackProcessor(EventCallbackProcessor):
             conversation_id=str(conversation_id),
         )
 
-        _logger.info(
+        logger.info(
             f'[Automation] Execution {record.execution_id} → {new_state.value} '
             f'(conversation: {conversation_id})',
             extra=build_log_context(
