@@ -364,7 +364,7 @@ class SQLAppConversationInfoService(AppConversationInfoService):
             accumulated_cost=metrics.accumulated_cost,
             prompt_tokens=usage.prompt_tokens,
             completion_tokens=usage.completion_tokens,
-            total_tokens=0,
+            total_tokens=usage.prompt_tokens + usage.completion_tokens if usage.prompt_tokens is not None and usage.completion_tokens is not None else None,
             max_budget_per_task=metrics.max_budget_per_task,
             cache_read_tokens=usage.cache_read_tokens,
             cache_write_tokens=usage.cache_write_tokens,

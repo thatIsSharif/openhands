@@ -57,6 +57,7 @@ def resolve_profile_llm(
             )
         }
     )
+
     if not has_real_api_key(resolved.api_key) and has_real_api_key(fallback_api_key):
         resolved = resolved.model_copy(update={'api_key': fallback_api_key})
     return resolved

@@ -366,6 +366,7 @@ async def on_conversation_update(
         # Store merged tags (includes automation context, skills, etc.)
         tags=merged_tags,
     )
+
     await app_conversation_info_service.save_app_conversation_info(
         app_conversation_info
     )

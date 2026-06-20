@@ -404,6 +404,7 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
                 pr_number=request.pr_number,
                 parent_conversation_id=request.parent_conversation_id,
             )
+
             await self.app_conversation_info_service.save_app_conversation_info(
                 app_conversation_info
             )
@@ -1012,14 +1013,8 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
         and usage ID).  All other user-configured fields (e.g.
         ``reasoning_effort``, ``extended_thinking_budget``, ``drop_params``)
         are preserved so that they reach the agent-server unchanged.
-
-        Args:
-            user: User information containing LLM preferences
-            llm_model: Optional specific model to use, falls back to user default
-
-        Returns:
-            Configured LLM instance
         """
+
         model: str = (
             llm_model
             or user.agent_settings.llm.model
@@ -1031,6 +1026,7 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
             user.agent_settings.llm.base_url,
             provider_base_url=self.openhands_provider_base_url,
         )
+
 
         return user.agent_settings.llm.model_copy(
             update={
