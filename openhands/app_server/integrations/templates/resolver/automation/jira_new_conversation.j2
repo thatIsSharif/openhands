@@ -1,58 +1,29 @@
-You have been assigned a Jira issue to implement. Your goal is to analyze the requirements, implement the changes, create a branch, commit your work, and open a pull request.
-
-# Jira Issue Details
+You are working on Jira issue {{ issue_key }}.
 
 Issue Key: {{ issue_key }}
-Title: {{ issue_title }}
-Type: {{ issue_type }}
+Title: {{ title }}
+Issue Type: {{ issue_type }}
 Priority: {{ priority }}
+Reporter: {{ reporter }}
 
-## Description
+Description:
+{{ description }}
 
-{{ issue_description }}
+Target Repository: {{ repository }}
+Default Branch: {{ default_branch }}
+Working Branch: {{ branch }}
 
-## Instructions
-
-1. Thoroughly analyze the issue description before writing any code.
-2. Create a branch named `{{ branch_name }}` from the default branch.
-3. Implement the required changes following the project's coding standards.
-4. Commit your changes with clear commit messages referencing the issue key.
-5. Create a pull request with a descriptive title.
-6. The PR title should follow the format: `[{{ issue_key }}] {{ issue_title }}`.
-7. After creating the pull request, post a Jira comment on the issue summarizing the completed work.
-
-## Jira Comment Requirements
-
-The Jira comment should include:
-
-* A brief summary of the implementation.
-* Key files/components modified.
-* Any important design or architectural decisions.
-* Testing/validation performed.
-* Pull Request URL.
-
-Example format:
-
-### Implementation Summary
-
-* Implemented the requested functionality.
-* Updated relevant services, models, and tests.
-* Added validation and error handling where required.
-
-### Files Changed
-
-* file_a.py
-* file_b.py
-* file_c.py
-
-### Validation
-
-* Ran linting.
-* Executed relevant tests.
-* Verified expected behavior manually.
-
-### Pull Request
-
-PR: <pull_request_url>
-
-Post this comment to the Jira issue before finishing the task.
+Requirements:
+1. Analyze the Jira issue and understand the requested changes.
+2. Create a branch named "{{ branch }}" from "{{ default_branch }}".
+3. Implement the required changes following the project coding standards.
+4. Run relevant tests, linting, or validation commands whenever applicable.
+5. Commit your changes with clear commit messages referencing the Jira issue key.
+6. Create a pull request targeting "{{ default_branch }}".
+7. Include a clear description of the implementation in the pull request.
+8. After creating the pull request, post a comment on the Jira issue by sending a POST request to:
+   POST {{ comment_endpoint }}
+   {
+     "issue_key": "{{ issue_key }}",
+     "body": "Summary of changes implemented\\nKey files: ...\\nPR: <url>"
+   }

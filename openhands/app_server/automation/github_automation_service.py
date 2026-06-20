@@ -12,17 +12,15 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-import json
 from dataclasses import dataclass
 
-from openhands.app_server.integrations.provider import ProviderType
-from openhands.app_server.automation.execution_models import ExecutionState, SourceType;
 from openhands.app_server.utils.logger import openhands_logger as logger
 
 from .correlation import build_log_context
-from .execution_models import SourceType
+from .execution_models import ExecutionState, SourceType
 from .execution_service import ExecutionService
 from .openhands_client import OpenHandsClient
+from .prompt_renderer import render_prompt
 
 GITHUB_WEBHOOK_EVENTS = frozenset({
     'pull_request_review_comment',
@@ -246,23 +244,22 @@ class GitHubAutomationService:
 
         # Transition to QUEUED
         await self.execution_service.transition_state(
-            execution_id, ExecutionState.QUEUED  # type: ignore[arg-type]
+            execution_id, ExecutionState.QUEUED
         )
 
+        # Build the comment endpoint URL from the incoming request
+        base_url = str(request.base_url).rstrip('/')
+        comment_endpoint = f'{base_url}/api/v1/git/github/webhook/comment'
+
         # Build prompt for the agent
-        prompt = (
-            f'A review comment was posted on pull request #{pr_number} '
-            f'in {repository}.\n\n'
-            f'Reviewer: {reviewer}\n'
-            f'Comment: {review_comment}\n\n'
-            f'Review branch: {branch}\n\n'
-            f'Please:\n'
-            f'1. Read the PR context and the review comment(s)\n'
-            f'2. Determine the required fixes\n'
-            f'3. Commit changes to the existing branch ({branch})\n'
-            f'4. Update the existing pull request (#{pr_number})\n\n'
-            f'The PR is the source of truth. Work directly on the '
-            f'existing branch and PR.'
+        prompt = render_prompt(
+            'github_review_conversation.j2',
+            pr_number=pr_number,
+            repository=repository,
+            reviewer=reviewer,
+            review_comment=review_comment,
+            branch=branch,
+            comment_endpoint=comment_endpoint,
         )
 
         # Create NEW OpenHands conversation with repository attached
@@ -280,7 +277,7 @@ class GitHubAutomationService:
         if conversation_id:
             await self.execution_service.transition_state(
                 execution_id,
-                ExecutionState.RUNNING,  # type: ignore[arg-type]
+                ExecutionState.RUNNING,
                 conversation_id=conversation_id,
             )
             return {
@@ -293,7 +290,7 @@ class GitHubAutomationService:
         else:
             await self.execution_service.transition_state(
                 execution_id,
-                ExecutionState.FAILED,  # type: ignore[arg-type]
+                ExecutionState.FAILED,
                 error_message='Failed to create OpenHands conversation',
             )
             return {
@@ -375,8 +372,12 @@ class GitHubAutomationService:
 
         # Transition to QUEUED
         await self.execution_service.transition_state(
-            execution_id, ExecutionState.QUEUED  # type: ignore[arg-type]
+            execution_id, ExecutionState.QUEUED
         )
+
+        # Build the comment endpoint URL from the incoming request
+        base_url = str(request.base_url).rstrip('/')
+        comment_endpoint = f'{base_url}/api/v1/git/github/webhook/comment'
 
         # Build prompt for the agent
         state_desc = {
@@ -384,20 +385,15 @@ class GitHubAutomationService:
             'changes_requested': 'requested changes',
             'comment': 'left a comment',
         }.get(review_state, f'({review_state})')
-        prompt = (
-            f'A review was submitted on pull request #{pr_number} '
-            f'in {repository}.\n\n'
-            f'Reviewer: {reviewer}\n'
-            f'Review state: {review_state}\n'
-            f'Review body: {review_comment}\n\n'
-            f'Review branch: {branch}\n\n'
-            f'Please:\n'
-            f'1. Read the PR context and the review feedback\n'
-            f'2. Determine the required fixes\n'
-            f'3. Commit changes to the existing branch ({branch})\n'
-            f'4. Update the existing pull request (#{pr_number})\n\n'
-            f'The PR is the source of truth. Work directly on the '
-            f'existing branch and PR.'
+        prompt = render_prompt(
+            'github_review_submitted_conversation.j2',
+            pr_number=pr_number,
+            repository=repository,
+            reviewer=reviewer,
+            review_state=review_state,
+            review_comment=review_comment,
+            branch=branch,
+            comment_endpoint=comment_endpoint,
         )
 
         # Create NEW OpenHands conversation with repository attached
@@ -415,7 +411,7 @@ class GitHubAutomationService:
         if conversation_id:
             await self.execution_service.transition_state(
                 execution_id,
-                ExecutionState.RUNNING,  # type: ignore[arg-type]
+                ExecutionState.RUNNING,
                 conversation_id=conversation_id,
             )
             return {
@@ -428,7 +424,7 @@ class GitHubAutomationService:
         else:
             await self.execution_service.transition_state(
                 execution_id,
-                ExecutionState.FAILED,  # type: ignore[arg-type]
+                ExecutionState.FAILED,
                 error_message='Failed to create OpenHands conversation',
             )
             return {

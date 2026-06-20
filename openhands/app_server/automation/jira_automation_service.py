@@ -13,29 +13,20 @@ Handles:
 
 from __future__ import annotations
 
-
 import hashlib
 import hmac
 import re
 from dataclasses import dataclass
 
-
 from openhands.app_server.utils.logger import openhands_logger as logger
-
 
 from .correlation import build_log_context
 from .execution_models import ExecutionState, SourceType
 from .execution_service import ExecutionService
 from .openhands_client import OpenHandsClient
-
+from .prompt_renderer import render_prompt
 
 JIRA_WEBHOOK_EVENTS = frozenset({'jira:issue_created', 'jira:issue_updated'})
-
-
-JIRA_TEMPLATE_PATH = (
-    'openhands/app_server/integrations/templates/resolver/automation/'
-    'jira_new_conversation.j2'
-)
 
 
 
@@ -131,8 +122,8 @@ def extract_jira_project_key(payload: dict) -> str | None:
 
 
 _JIRA_REPOSITORY_FIELDS = [
-    "customfield_10171",
-    "repository",
+    'customfield_10171',
+    'repository',
 ]
 
 
@@ -370,32 +361,18 @@ class JiraAutomationService:
         comment_endpoint = f'{base_url}/api/v1/jira/start/comment'
 
         # Build prompt from template with full context
-        prompt = (
-            f'You are working on Jira issue {issue_key}.\n\n'
-            f'Issue Key: {issue_key}\n'
-            f'Title: {summary}\n'
-            f'Issue Type: {issue_data["issue_type"]}\n'
-            f'Priority: {issue_data["priority"]}\n'
-            f'Reporter: {issue_data["reporter"]}\n\n'
-            f'Description:\n{issue_data["description"]}\n\n'
-            f'Target Repository: {repository_str}\n'
-            f'Default Branch: {default_branch}\n'
-            f'Working Branch: {branch}\n\n'
-            f'Requirements:\n'
-            f'1. Analyze the Jira issue and understand the requested changes.\n'
-            f'2. Create a branch named "{branch}" from "{default_branch}".\n'
-            f'3. Implement the required changes following the project coding standards.\n'
-            f'4. Run relevant tests, linting, or validation commands whenever applicable.\n'
-            f'5. Commit your changes with clear commit messages referencing the Jira issue key.\n'
-            f'6. Create a pull request targeting "{default_branch}".\n'
-            f'7. Include a clear description of the implementation in the pull request.\n'
-            f'8. After creating the pull request, post a comment on the Jira issue by sending a POST request to:\n'
-            f'   POST {comment_endpoint}\n'
-            f'   {{\n'
-            f'     "issue_key": "{issue_key}",\n'
-            f'     "body": "Summary of changes implemented\\\\nKey files: ...\\\\nPR: <url>"\n'
-            f'   }}\n\n'
-            f'Do NOT call the Jira API directly. Only use the endpoint above.\n\n'
+        prompt = render_prompt(
+            'jira_new_conversation.j2',
+            issue_key=issue_key,
+            title=summary,
+            issue_type=issue_data['issue_type'],
+            priority=issue_data['priority'],
+            reporter=issue_data['reporter'],
+            description=issue_data['description'],
+            repository=repository_str,
+            default_branch=default_branch,
+            branch=branch,
+            comment_endpoint=comment_endpoint,
         )
 
 

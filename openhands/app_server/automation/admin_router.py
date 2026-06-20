@@ -13,6 +13,7 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException
 
 from openhands.agent_server.models import OpenHandsModel
+from openhands.app_server.automation.execution_store import ExecutionStore
 
 router = APIRouter(prefix='/admin', tags=['admin'])
 
@@ -61,8 +62,6 @@ async def create_project_repo(
     Multiple entries can share the same jira_project_key to support
     projects that span multiple repositories.
     """
-    from openhands.app_server.automation.execution_store import ExecutionStore
-
     store = ExecutionStore()
     record = await store.create_jira_project_repository(
         jira_project_key=request.jira_project_key,
@@ -86,8 +85,6 @@ async def create_project_repo(
 @router.get('/jira-project-repos')
 async def list_project_repos() -> ProjectRepoListResponse:
     """List all Jira project → repository mappings."""
-    from openhands.app_server.automation.execution_store import ExecutionStore
-
     store = ExecutionStore()
     records = await store.list_jira_project_repositories()
     return ProjectRepoListResponse(
@@ -110,8 +107,6 @@ async def get_project_repos_by_key(
     project_key: str,
 ) -> ProjectRepoListResponse:
     """Get all Jira project → repository mappings for a project key."""
-    from openhands.app_server.automation.execution_store import ExecutionStore
-
     store = ExecutionStore()
     records = await store.get_jira_project_repos_by_project_key(project_key)
     return ProjectRepoListResponse(
@@ -134,8 +129,6 @@ async def get_project_repo_by_id(
     record_id: int,
 ) -> ProjectRepoResponse:
     """Get a single Jira project → repository mapping by its record ID."""
-    from openhands.app_server.automation.execution_store import ExecutionStore
-
     store = ExecutionStore()
     record = await store.get_jira_project_repository_by_id(record_id)
     if not record:
@@ -158,8 +151,6 @@ async def delete_project_repo(
     record_id: int,
 ) -> DeleteResponse:
     """Delete a Jira project → repository mapping by its record ID."""
-    from openhands.app_server.automation.execution_store import ExecutionStore
-
     store = ExecutionStore()
     deleted = await store.delete_jira_project_repository(record_id)
     if not deleted:

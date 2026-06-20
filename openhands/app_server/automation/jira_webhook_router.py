@@ -11,16 +11,27 @@ Flow:
 
 from __future__ import annotations
 
+import os
+
 from fastapi import APIRouter, BackgroundTasks, Request
+from pydantic import BaseModel
 
 from openhands.agent_server.models import OpenHandsModel
+from openhands.app_server.automation.execution_service import (
+    ExecutionService,
+)
+from openhands.app_server.automation.execution_store import ExecutionStore
 from openhands.app_server.automation.jira_automation_service import (
+    JiraAutomationService,
     verify_jira_signature,
 )
+from openhands.app_server.automation.openhands_client import (
+    OpenHandsClient,
+)
+from openhands.app_server.utils.jira import add_comment
 from openhands.app_server.utils.logger import openhands_logger as logger
 
-from pydantic import BaseModel
-from openhands.app_server.utils.jira import add_comment
+
 class JiraCommentRequest(BaseModel):
     issue_key: str
     body: str
@@ -68,8 +79,6 @@ async def handle_jira_webhook(
         )
 
     # Verify signature (optional - requires JIRA_WEBHOOK_SECRET env var)
-    import os
-
     jira_secret = os.environ.get('JIRA_WEBHOOK_SECRET', '')
     if jira_secret:
         signature = request.headers.get('X-Hub-Signature')
@@ -98,53 +107,45 @@ async def _process_jira_event(
 ) -> None:
     """Process a Jira webhook event in the background."""
 
-    from openhands.app_server.automation.execution_service import (
-        ExecutionService,
-    )
-    from openhands.app_server.automation.execution_store import ExecutionStore
-    from openhands.app_server.automation.jira_automation_service import (
-        JiraAutomationService,
-    )
-    from openhands.app_server.automation.openhands_client import (
-        OpenHandsClient,
-    )
-
     try:
-        TARGET_ACCOUNT_ID = (
-            "712020:31da0b8e-ed93-4098-8ddc-582475da756c"
-        )
+        # Read target account ID from environment (set JIRA_TARGET_ACCOUNT_ID)
+        target_account_id = os.environ.get('JIRA_TARGET_ACCOUNT_ID', '')
 
         # Only process assignment events
-        if payload.get("issue_event_type_name") != "issue_assigned":
+        if payload.get('issue_event_type_name') != 'issue_assigned':
             logger.info(
-                "[Automation] Ignoring Jira event: not an assignment event"
+                '[Automation] Ignoring Jira event: not an assignment event'
             )
             return
 
         assignee_change = next(
             (
                 item
-                for item in payload.get("changelog", {}).get("items", [])
-                if item.get("field") == "assignee"
+                for item in payload.get('changelog', {}).get('items', [])
+                if item.get('field') == 'assignee'
             ),
             None,
         )
 
         if not assignee_change:
             logger.info(
-                "[Automation] Ignoring Jira event: no assignee change found"
+                '[Automation] Ignoring Jira event: no assignee change found'
             )
             return
 
-        if assignee_change.get("to") != TARGET_ACCOUNT_ID:
+        if target_account_id and assignee_change.get('to') != target_account_id:
             logger.info(
                 "[Automation] Ignoring Jira event: not assigned to target user "
                 f"(to={assignee_change.get('to')})"
             )
             return
+        elif not target_account_id:
+            logger.info(
+                '[Automation] No JIRA_TARGET_ACCOUNT_ID set, processing any assignee'
+            )
 
         logger.info(
-            "[Automation] Issue assigned to target user, starting automation"
+            '[Automation] Issue assigned to target user, starting automation'
         )
 
         # Build services using OSS DI
@@ -178,4 +179,4 @@ async def post_jira_comment(req: JiraCommentRequest) -> dict:
     """Post a comment to Jira. LLM calls this — code handles the Jira API."""
 
     result = add_comment(req.issue_key, req.body)
-    return {"status": "ok", "comment_id": result["id"]}
+    return {'status': 'ok', 'comment_id': result['id']}
