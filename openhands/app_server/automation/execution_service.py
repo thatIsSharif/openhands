@@ -1,8 +1,7 @@
 """Execution service - business logic for the execution lifecycle.
 
 Coordinates state machine transitions, idempotency checks, and
-persistence of execution records. Creates Langfuse traces when
-transitions to RUNNING occur and Langfuse is configured.
+persistence of execution records.
 """
 
 from __future__ import annotations
@@ -19,7 +18,6 @@ from .execution_models import (
     validate_transition,
 )
 from .execution_store import ExecutionStore
-from .langfuse_service import LangfuseService
 
 
 @dataclass
@@ -99,8 +97,6 @@ class ExecutionService:
         """Transition an execution to a new state.
 
         Validates the transition, then persists the change.
-        Creates a Langfuse trace when transitioning to RUNNING
-        if Langfuse is configured.
 
         Returns:
             Updated ExecutionRecord, or None if not found.
@@ -135,10 +131,5 @@ class ExecutionService:
                     conversation_id=conversation_id,
                 ),
             )
-
-        # Create Langfuse trace when execution starts running
-        if target == ExecutionState.RUNNING and updated:
-            langfuse = LangfuseService()
-            await langfuse.start_trace(updated)
 
         return updated

@@ -10,5 +10,13 @@ Please:
 2. Determine the required fixes
 3. Commit changes to the existing branch ({{ branch }})
 4. Update the existing pull request (#{{ pr_number }})
+5. After completing the changes, post a summary comment on the PR by sending a POST request to:
+   POST {{ comment_endpoint }}
+   {
+     "repository": "{{ repository }}",
+     "pr_number": {{ pr_number }},
+     "body": "Summary of changes implemented\nKey files: ..."
+   }
 
 The PR is the source of truth. Work directly on the existing branch and PR.
+Do NOT call the GitHub API directly. Only use the endpoint above.

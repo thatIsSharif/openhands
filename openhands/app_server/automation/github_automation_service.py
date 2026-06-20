@@ -247,6 +247,10 @@ class GitHubAutomationService:
             execution_id, ExecutionState.QUEUED
         )
 
+        # Build the comment endpoint URL from the incoming request
+        base_url = str(request.base_url).rstrip('/')
+        comment_endpoint = f'{base_url}/api/v1/git/github/webhook/comment'
+
         # Build prompt for the agent
         prompt = render_prompt(
             'github_review_conversation.j2',
@@ -255,6 +259,7 @@ class GitHubAutomationService:
             reviewer=reviewer,
             review_comment=review_comment,
             branch=branch,
+            comment_endpoint=comment_endpoint,
         )
 
         # Create NEW OpenHands conversation with repository attached
@@ -370,6 +375,10 @@ class GitHubAutomationService:
             execution_id, ExecutionState.QUEUED
         )
 
+        # Build the comment endpoint URL from the incoming request
+        base_url = str(request.base_url).rstrip('/')
+        comment_endpoint = f'{base_url}/api/v1/git/github/webhook/comment'
+
         # Build prompt for the agent
         state_desc = {
             'approved': 'approved',
@@ -384,6 +393,7 @@ class GitHubAutomationService:
             review_state=review_state,
             review_comment=review_comment,
             branch=branch,
+            comment_endpoint=comment_endpoint,
         )
 
         # Create NEW OpenHands conversation with repository attached

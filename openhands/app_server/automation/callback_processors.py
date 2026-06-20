@@ -27,7 +27,6 @@ from openhands.sdk.event.conversation_state import ConversationStateUpdateEvent
 from .correlation import build_log_context
 from .execution_models import ExecutionState
 from .execution_store import ExecutionStore
-from .langfuse_service import LangfuseService
 
 
 class AutomationEventCallbackProcessor(EventCallbackProcessor):
@@ -36,8 +35,6 @@ class AutomationEventCallbackProcessor(EventCallbackProcessor):
     Registered on automation-triggered conversations. Listens for
     ConversationStateUpdateEvent with terminal execution_status values
     (FINISHED, ERROR, STUCK) and updates the execution record.
-
-    Also finalizes Langfuse traces when configured.
     """
 
     event_kind: ClassVar[EventKind] = 'ConversationStateUpdateEvent'
@@ -94,14 +91,6 @@ class AutomationEventCallbackProcessor(EventCallbackProcessor):
                 conversation_id=str(conversation_id),
             ),
         )
-
-        # Finalize Langfuse trace if configured
-        # Re-fetch the record to get the updated state
-        updated_record = await store.get_execution(record.execution_id)
-        if updated_record:
-            langfuse = LangfuseService()
-            trace_ctx = getattr(callback, '_langfuse_ctx', None)
-            await langfuse.finalize_trace(trace_ctx, updated_record)
 
         # Disable this callback after terminal event
         callback.status = EventCallbackStatus.COMPLETED

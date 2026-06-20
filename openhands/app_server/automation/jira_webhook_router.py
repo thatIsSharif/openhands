@@ -108,9 +108,8 @@ async def _process_jira_event(
     """Process a Jira webhook event in the background."""
 
     try:
-        TARGET_ACCOUNT_ID = (
-            '712020:31da0b8e-ed93-4098-8ddc-582475da756c'
-        )
+        # Read target account ID from environment (set JIRA_TARGET_ACCOUNT_ID)
+        target_account_id = os.environ.get('JIRA_TARGET_ACCOUNT_ID', '')
 
         # Only process assignment events
         if payload.get('issue_event_type_name') != 'issue_assigned':
@@ -134,12 +133,16 @@ async def _process_jira_event(
             )
             return
 
-        if assignee_change.get('to') != TARGET_ACCOUNT_ID:
+        if target_account_id and assignee_change.get('to') != target_account_id:
             logger.info(
                 "[Automation] Ignoring Jira event: not assigned to target user "
                 f"(to={assignee_change.get('to')})"
             )
             return
+        elif not target_account_id:
+            logger.info(
+                '[Automation] No JIRA_TARGET_ACCOUNT_ID set, processing any assignee'
+            )
 
         logger.info(
             '[Automation] Issue assigned to target user, starting automation'

@@ -18,6 +18,7 @@ Flow:
 from __future__ import annotations
 
 from fastapi import APIRouter, BackgroundTasks, Request
+from pydantic import BaseModel
 
 from openhands.agent_server.models import OpenHandsModel
 from openhands.app_server.automation.execution_service import (
@@ -31,6 +32,7 @@ from openhands.app_server.automation.github_automation_service import (
 from openhands.app_server.automation.openhands_client import (
     OpenHandsClient,
 )
+from openhands.app_server.utils.github import add_pr_comment
 from openhands.app_server.utils.logger import openhands_logger as logger
 
 router = APIRouter(prefix='/git/github/webhook', tags=['automation'])
@@ -46,6 +48,14 @@ class GitHubWebhookResponse(OpenHandsModel):
     repository: str | None = None
     reason: str | None = None
     error: str | None = None
+
+
+class GitHubCommentRequest(BaseModel):
+    """Request model for posting a comment on a GitHub PR."""
+
+    repository: str
+    pr_number: int
+    body: str
 
 
 def _is_pull_request_review_submitted(payload: dict) -> bool:
@@ -222,3 +232,14 @@ async def _process_github_review_submitted(
         delivery_id,
         request,
     )
+
+
+@router.post('/comment')
+async def post_github_pr_comment(req: GitHubCommentRequest) -> dict:
+    """Post a comment on a GitHub PR.
+
+    LLM calls this to post review follow-up comments to the PR.
+    The function handles the GitHub API call.
+    """
+    result = add_pr_comment(req.repository, req.pr_number, req.body)
+    return {'status': 'ok', 'comment_id': result['id']}
