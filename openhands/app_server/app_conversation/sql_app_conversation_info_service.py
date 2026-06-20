@@ -349,10 +349,6 @@ class SQLAppConversationInfoService(AppConversationInfoService):
     ) -> AppConversationInfo:
         metrics = info.metrics or MetricsSnapshot()
         usage = metrics.accumulated_token_usage or TokenUsage()
-        print(f"Saving conversation info************************************************************************************************: {info}")
-        print(f"Metrics**************************************************************************************************************: {metrics}")
-        print(f"Usage****************************************************************************************************************: {usage}")
-
 
         stored = StoredConversationMetadata(
             conversation_id=str(info.id),
