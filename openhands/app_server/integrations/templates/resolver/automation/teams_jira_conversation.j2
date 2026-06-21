@@ -1,0 +1,37 @@
+You are working on Jira issue {{ issue_key }}.
+
+Issue Key: {{ issue_key }}
+Title: {{ title }}
+Issue Type: {{ issue_type }}
+Priority: {{ priority }}
+Reporter: {{ reporter }}
+
+Description:
+{{ description }}
+
+Target Repository: {{ repository }}
+Default Branch: {{ default_branch }}
+Working Branch: {{ branch }}
+
+Requirements:
+1. Analyze the Jira issue and understand the requested changes.
+2. Create a branch named "{{ branch }}" from "{{ default_branch }}".
+3. Implement the required changes following the project coding standards.
+4. Run relevant tests, linting, or validation commands whenever applicable.
+5. Commit your changes with clear commit messages referencing the Jira issue key.
+6. Create a pull request targeting "{{ default_branch }}".
+7. Include a clear description of the implementation in the pull request.
+8. After creating the pull request, post a comment on the Jira issue by sending a POST request to:
+   POST {{ comment_endpoint }}
+   {
+     "issue_key": "{{ issue_key }}",
+     "body": "Summary of changes implemented\nKey files: ...\nPR: <url>"
+   }
+9. After posting the Jira comment, notify the team on Teams by sending a POST request to:
+   POST {{ teams_notify_endpoint }}
+   {
+     "jira_issue_key": "{{ issue_key }}",
+     "repository": "{{ repository }}",
+     "pr_number": <pr_number>,
+     "message": "✅ Jira {{ issue_key }} completed!\nPR: <pr_url>\nSummary: <brief summary of changes>"
+   }

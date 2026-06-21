@@ -26,6 +26,7 @@ from __future__ import annotations
 import hashlib
 import os
 
+import httpx
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
@@ -227,18 +228,20 @@ async def start_task(
         execution_id, ExecutionState.QUEUED
     )
 
-    # Build comment endpoint for the agent to post back
+    # Build endpoints for the agent to call when work is complete
     base_url = str(request.base_url).rstrip('/')
     comment_endpoint = f'{base_url}/api/v1/jira/start/comment'
+    teams_notify_endpoint = f'{base_url}/api/v1/teams/notify'
 
     # Determine default branch
     default_branch = 'main'
     if '/' in repository:
         default_branch = 'main'
 
-    # Render the same Jira prompt template used by the Jira automation
+    # Render the Teams-specific Jira prompt template.
+    # The agent will post a comment to Jira AND notify Teams when done.
     prompt = render_prompt(
-        'jira_new_conversation.j2',
+        'teams_jira_conversation.j2',
         issue_key=issue_key,
         title=issue_data.get('summary', ''),
         issue_type=issue_type,
@@ -249,6 +252,7 @@ async def start_task(
         default_branch=default_branch,
         branch=branch,
         comment_endpoint=comment_endpoint,
+        teams_notify_endpoint=teams_notify_endpoint,
     )
 
     # Create the agent conversation
@@ -338,19 +342,22 @@ async def start_pr_fix(
         execution_id, ExecutionState.QUEUED
     )
 
-    # Build comment endpoint for the agent to post back
+    # Build endpoints for the agent to call when work is complete
     base_url = str(request.base_url).rstrip('/')
     comment_endpoint = f'{base_url}/api/v1/git/github/webhook/comment'
+    teams_notify_endpoint = f'{base_url}/api/v1/teams/notify'
 
-    # Render the same GitHub review prompt template
+    # Render the Teams-specific GitHub review prompt template.
+    # The agent will post a PR comment AND notify Teams when done.
     prompt = render_prompt(
-        'github_review_conversation.j2',
+        'teams_github_review_conversation.j2',
         pr_number=req.pr_number,
         repository=req.repository,
         reviewer='Teams User',
         review_comment=req.review_comment,
         branch='',
         comment_endpoint=comment_endpoint,
+        teams_notify_endpoint=teams_notify_endpoint,
     )
 
     # Create the agent conversation
@@ -390,6 +397,62 @@ async def start_pr_fix(
             pr_number=req.pr_number,
             error='Failed to create OpenHands conversation',
         )
+
+
+# ── Notify endpoint (called by the agent when work completes) ────────────
+
+
+class TeamsNotifyRequest(BaseModel):
+    """Request from the agent to notify Teams that work is complete."""
+
+    jira_issue_key: str | None = None
+    repository: str | None = None
+    pr_number: int | None = None
+    message: str = ''
+
+
+@router.post('/notify')
+async def notify_teams(req: TeamsNotifyRequest) -> dict:
+    """Notify Teams that an agent task is complete.
+
+    The agent calls this endpoint (via a POST request) when it finishes
+    implementing a Jira issue or fixing a PR, following the same pattern
+    used by the Jira ``/jira/start/comment`` and GitHub
+    ``/git/github/webhook/comment`` endpoints.
+
+    This endpoint forwards the notification to Power Automate via
+    ``TEAMS_NOTIFICATION_WEBHOOK_URL``.
+    """
+    webhook_url = os.environ.get('TEAMS_NOTIFICATION_WEBHOOK_URL', '')
+    if not webhook_url:
+        logger.warning(
+            '[Teams] notify called but TEAMS_NOTIFICATION_WEBHOOK_URL '
+            'is not set — notification not sent'
+        )
+        return {'status': 'skipped', 'reason': 'TEAMS_NOTIFICATION_WEBHOOK_URL not configured'}
+
+    payload = {
+        'jira_issue_key': req.jira_issue_key,
+        'repository': req.repository,
+        'pr_number': req.pr_number,
+        'message': req.message,
+        'state': 'COMPLETED',
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.post(
+                webhook_url,
+                json=payload,
+                headers={'Content-Type': 'application/json'},
+            )
+            logger.info(
+                f'[Teams] Notification sent (HTTP {resp.status_code})'
+            )
+            return {'status': 'ok', 'http_status': resp.status_code}
+    except Exception as e:
+        logger.error(f'[Teams] Failed to send notification: {e}')
+        return {'status': 'failed', 'error': str(e)}
 
 
 # ── Status Polling ───────────────────────────────────────────────────────

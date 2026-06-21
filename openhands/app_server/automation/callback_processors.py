@@ -6,11 +6,11 @@ Hooks into the EventCallbackProcessor system to react to terminal states.
 
 from __future__ import annotations
 
-import json
 import os
-import urllib.request
 from typing import ClassVar
 from uuid import UUID
+
+import httpx
 
 from openhands.app_server.event_callback.event_callback_models import (
     EventCallback,
@@ -32,7 +32,7 @@ from .execution_models import ExecutionState, SourceType
 from .execution_store import ExecutionStore
 
 
-def _send_teams_notification(
+async def _send_teams_notification(
     execution_id: str,
     state: ExecutionState,
     jira_issue_key: str | None = None,
@@ -48,25 +48,24 @@ def _send_teams_notification(
     if not webhook_url:
         return
 
-    payload = json.dumps({
+    payload = {
         'execution_id': execution_id,
         'state': state.value,
         'jira_issue_key': jira_issue_key,
         'repository': repository,
         'error_message': error_message,
-    }).encode('utf-8')
+    }
 
     try:
-        req = urllib.request.Request(
-            webhook_url,
-            data=payload,
-            headers={'Content-Type': 'application/json'},
-            method='POST',
-        )
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.post(
+                webhook_url,
+                json=payload,
+                headers={'Content-Type': 'application/json'},
+            )
             logger.info(
                 f'[Teams] Notification sent for execution {execution_id} '
-                f'(HTTP {resp.status})',
+                f'(HTTP {resp.status_code})',
             )
     except Exception as e:
         logger.warning(
@@ -147,7 +146,7 @@ class AutomationEventCallbackProcessor(EventCallbackProcessor):
             record.jira_issue_key
             or record.source_type == SourceType.TEAMS.value
         ):
-            _send_teams_notification(
+            await _send_teams_notification(
                 execution_id=record.execution_id,
                 state=new_state,
                 jira_issue_key=record.jira_issue_key,
