@@ -26,7 +26,6 @@ Do NOT call the GitHub API directly. Only use the endpoint above.
    {
      "repository": "{{ repository }}",
      "pr_number": {{ pr_number }},
-     "message": "✅ PR #{{ pr_number }} in {{ repository }} has been updated with fixes.
-Comment: {{ review_comment }}"
+     "message": "✅ PR #{{ pr_number }} in {{ repository }} has been updated with fixes.\nComment: {{ review_comment }}"
    }
 {% endif %}
