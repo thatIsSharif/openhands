@@ -250,6 +250,7 @@ class GitHubAutomationService:
         # Build the comment endpoint URL from the incoming request
         base_url = str(request.base_url).rstrip('/')
         comment_endpoint = f'{base_url}/api/v1/git/github/webhook/comment'
+        teams_notify_endpoint = f'{base_url}/api/v1/teams/notify'
 
         # Build prompt for the agent
         prompt = render_prompt(
@@ -260,6 +261,7 @@ class GitHubAutomationService:
             review_comment=review_comment,
             branch=branch,
             comment_endpoint=comment_endpoint,
+            teams_notify_endpoint=teams_notify_endpoint,
         )
 
         # Create NEW OpenHands conversation with repository attached
@@ -378,6 +380,7 @@ class GitHubAutomationService:
         # Build the comment endpoint URL from the incoming request
         base_url = str(request.base_url).rstrip('/')
         comment_endpoint = f'{base_url}/api/v1/git/github/webhook/comment'
+        teams_notify_endpoint = f'{base_url}/api/v1/teams/notify'
 
         # Build prompt for the agent
         state_desc = {
@@ -394,6 +397,7 @@ class GitHubAutomationService:
             review_comment=review_comment,
             branch=branch,
             comment_endpoint=comment_endpoint,
+            teams_notify_endpoint=teams_notify_endpoint,
         )
 
         # Create NEW OpenHands conversation with repository attached

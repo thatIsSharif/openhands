@@ -423,7 +423,7 @@ async def notify_teams(req: TeamsNotifyRequest) -> dict:
     ``/git/github/webhook/comment`` endpoints.
 
     This endpoint forwards the notification to Power Automate via
-    ``TEAMS_NOTIFICATION_WEBHOOK_URL``.
+    ``TEAMS_NOTIFICATION_WEBHOOK_URL`` using an Adaptive Card payload.
     """
     webhook_url = os.environ.get('TEAMS_NOTIFICATION_WEBHOOK_URL', '')
     if not webhook_url:
@@ -433,19 +433,72 @@ async def notify_teams(req: TeamsNotifyRequest) -> dict:
         )
         return {'status': 'skipped', 'reason': 'TEAMS_NOTIFICATION_WEBHOOK_URL not configured'}
 
-    payload = {
-        'jira_issue_key': req.jira_issue_key,
-        'repository': req.repository,
-        'pr_number': req.pr_number,
-        'message': req.message,
-        'state': 'COMPLETED',
+    # Extract details from the request
+    issue_key = req.jira_issue_key or ''
+    repo = req.repository or ''
+    pr_num = req.pr_number
+    message = req.message or ''
+
+    # Build the Adaptive Card payload
+    adaptive_card_payload = {
+        "type": "message",
+        "attachments": [
+            {
+                "contentType": "application/vnd.microsoft.card.adaptive",
+                "content": {
+                    "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                    "type": "AdaptiveCard",
+                    "version": "1.4",
+                    "body": [
+                        {
+                            "type": "TextBlock",
+                            "size": "Large",
+                            "weight": "Bolder",
+                            "text": "✅ Jira Task Complete" if not issue_key else f"✅ Jira {issue_key} Completed",
+                            "color": "Good"
+                        },
+                        {
+                            "type": "FactSet",
+                            "facts": [
+                                {"title": "Issue", "value": issue_key} if issue_key else None,
+                                {"title": "Repository", "value": repo} if repo else None,
+                                {"title": "PR Number", "value": str(pr_num)} if pr_num else None,
+                            ],
+                            "visible": bool(issue_key or repo or pr_num)
+                        },
+                        {
+                            "type": "TextBlock",
+                            "text": message,
+                            "wrap": True
+                        }
+                    ],
+                    "actions": [
+                        {
+                            "type": "Action.OpenUrl",
+                            "title": "View Pull Request",
+                            "url": f"https://github.com/{repo}/pull/{pr_num}"
+                        }
+                    ] if repo and pr_num else []
+                }
+            }
+        ]
     }
+
+    # Filter out None facts
+    fact_set = None
+    for item in adaptive_card_payload["attachments"][0]["content"]["body"]:
+        if item.get("type") == "FactSet":
+            item["facts"] = [f for f in item["facts"] if f is not None]
+            fact_set = item
+            break
+    if fact_set and not fact_set["facts"]:
+        adaptive_card_payload["attachments"][0]["content"]["body"].remove(fact_set)
 
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.post(
                 webhook_url,
-                json=payload,
+                json=adaptive_card_payload,
                 headers={'Content-Type': 'application/json'},
             )
             logger.info(
