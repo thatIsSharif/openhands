@@ -238,10 +238,11 @@ async def start_task(
     if '/' in repository:
         default_branch = 'main'
 
-    # Render the Teams-specific Jira prompt template.
-    # The agent will post a comment to Jira AND notify Teams when done.
+    # Render the Jira prompt template.
+    # The agent will post a comment to Jira AND notify Teams when done
+    # (the template conditionally shows the Teams step when teams_notify_endpoint is set).
     prompt = render_prompt(
-        'teams_jira_conversation.j2',
+        'jira_new_conversation.j2',
         issue_key=issue_key,
         title=issue_data.get('summary', ''),
         issue_type=issue_type,
@@ -347,10 +348,11 @@ async def start_pr_fix(
     comment_endpoint = f'{base_url}/api/v1/git/github/webhook/comment'
     teams_notify_endpoint = f'{base_url}/api/v1/teams/notify'
 
-    # Render the Teams-specific GitHub review prompt template.
-    # The agent will post a PR comment AND notify Teams when done.
+    # Render the GitHub review prompt template.
+    # The agent will post a PR comment AND notify Teams when done
+    # (the template conditionally shows the Teams step when teams_notify_endpoint is set).
     prompt = render_prompt(
-        'teams_github_review_conversation.j2',
+        'github_review_conversation.j2',
         pr_number=req.pr_number,
         repository=req.repository,
         reviewer='Teams User',
