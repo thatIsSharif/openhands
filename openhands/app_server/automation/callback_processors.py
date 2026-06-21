@@ -140,8 +140,13 @@ class AutomationEventCallbackProcessor(EventCallbackProcessor):
             ),
         )
 
-        # Optionally send Teams push notification
-        if record.source_type == SourceType.TEAMS.value:
+        # Optionally send Teams push notification.
+        # Fires for executions with a jira_issue_key OR started from Teams,
+        # when TEAMS_NOTIFICATION_WEBHOOK_URL is configured.
+        if (
+            record.jira_issue_key
+            or record.source_type == SourceType.TEAMS.value
+        ):
             _send_teams_notification(
                 execution_id=record.execution_id,
                 state=new_state,
