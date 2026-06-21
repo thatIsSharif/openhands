@@ -6,8 +6,11 @@ Hooks into the EventCallbackProcessor system to react to terminal states.
 
 from __future__ import annotations
 
+import os
 from typing import ClassVar
 from uuid import UUID
+
+import httpx
 
 from openhands.app_server.event_callback.event_callback_models import (
     EventCallback,
@@ -25,8 +28,50 @@ from openhands.sdk.conversation import ConversationExecutionStatus
 from openhands.sdk.event.conversation_state import ConversationStateUpdateEvent
 
 from .correlation import build_log_context
-from .execution_models import ExecutionState
+from .execution_models import ExecutionState, SourceType
 from .execution_store import ExecutionStore
+
+
+async def _send_teams_notification(
+    execution_id: str,
+    state: ExecutionState,
+    jira_issue_key: str | None = None,
+    repository: str | None = None,
+    error_message: str | None = None,
+) -> None:
+    """Send a completion notification to the Teams Power Automate webhook.
+
+    Reads ``TEAMS_NOTIFICATION_WEBHOOK_URL`` from the environment.
+    This is a fire-and-forget call — failures are logged but not raised.
+    """
+    webhook_url = os.environ.get('TEAMS_NOTIFICATION_WEBHOOK_URL', '')
+    if not webhook_url:
+        return
+
+    payload = {
+        'execution_id': execution_id,
+        'state': state.value,
+        'jira_issue_key': jira_issue_key,
+        'repository': repository,
+        'error_message': error_message,
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.post(
+                webhook_url,
+                json=payload,
+                headers={'Content-Type': 'application/json'},
+            )
+            logger.info(
+                f'[Teams] Notification sent for execution {execution_id} '
+                f'(HTTP {resp.status_code})',
+            )
+    except Exception as e:
+        logger.warning(
+            f'[Teams] Failed to send notification for execution '
+            f'{execution_id}: {e}',
+        )
 
 
 class AutomationEventCallbackProcessor(EventCallbackProcessor):
@@ -35,6 +80,8 @@ class AutomationEventCallbackProcessor(EventCallbackProcessor):
     Registered on automation-triggered conversations. Listens for
     ConversationStateUpdateEvent with terminal execution_status values
     (FINISHED, ERROR, STUCK) and updates the execution record.
+    Optionally sends a push notification to the Teams Power Automate
+    webhook if ``TEAMS_NOTIFICATION_WEBHOOK_URL`` is set.
     """
 
     event_kind: ClassVar[EventKind] = 'ConversationStateUpdateEvent'
@@ -91,6 +138,25 @@ class AutomationEventCallbackProcessor(EventCallbackProcessor):
                 conversation_id=str(conversation_id),
             ),
         )
+
+        # Optionally send Teams push notification.
+        # Fires for executions with a jira_issue_key OR started from Teams,
+        # when TEAMS_NOTIFICATION_WEBHOOK_URL is configured.
+        if (
+            record.jira_issue_key
+            or record.source_type == SourceType.TEAMS.value
+        ):
+            await _send_teams_notification(
+                execution_id=record.execution_id,
+                state=new_state,
+                jira_issue_key=record.jira_issue_key,
+                repository=record.repository,
+                error_message=(
+                    record.error_message
+                    if new_state == ExecutionState.FAILED
+                    else None
+                ),
+            )
 
         # Disable this callback after terminal event
         callback.status = EventCallbackStatus.COMPLETED
