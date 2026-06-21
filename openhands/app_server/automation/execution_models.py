@@ -23,6 +23,7 @@ class SourceType(str, Enum):
 
     JIRA = 'jira'
     GITHUB = 'github'
+    TEAMS = 'teams'
 
 
 VALID_TRANSITIONS: dict[ExecutionState, set[ExecutionState]] = {

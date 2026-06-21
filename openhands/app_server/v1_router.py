@@ -10,6 +10,9 @@ from openhands.app_server.automation.github_webhook_router import (
 from openhands.app_server.automation.jira_webhook_router import (
     router as jira_webhook_router,
 )
+from openhands.app_server.automation.teams_webhook_router import (
+    router as teams_webhook_router,
+)
 from openhands.app_server.config_api.config_router import router as config_router
 from openhands.app_server.event import event_router
 from openhands.app_server.event_callback import (
@@ -46,4 +49,5 @@ router.include_router(git_router)
 router.include_router(config_router)
 router.include_router(jira_webhook_router)
 router.include_router(github_webhook_router)
+router.include_router(teams_webhook_router)
 router.include_router(admin_router)
