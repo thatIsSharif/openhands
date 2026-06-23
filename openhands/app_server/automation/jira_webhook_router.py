@@ -164,10 +164,20 @@ async def _process_jira_event(
             request=request,
         )
 
-        logger.info(
-            f'[Automation] Jira event processed: {result.get("status")} '
-            f'(execution: {result.get("execution_id", "N/A")})',
-        )
+        if result.get('status') == 'multi':
+            executions = result.get('executions', [])
+            ids = ', '.join(
+                e.get('execution_id', 'N/A') for e in executions
+            )
+            logger.info(
+                f'[Automation] Jira event processed: multi '
+                f'({len(executions)} executions: {ids})',
+            )
+        else:
+            logger.info(
+                f'[Automation] Jira event processed: {result.get("status")} '
+                f'(execution: {result.get("execution_id", "N/A")})',
+            )
 
     except Exception:
         import traceback

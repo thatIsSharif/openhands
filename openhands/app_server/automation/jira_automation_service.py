@@ -5,14 +5,15 @@ Handles:
 - Webhook signature verification (HMAC-SHA256)
 - Event ID computation for idempotency
 - Issue data extraction
-- Repository extraction from Jira issue payload
+- Repository resolution from jira_project_repositories table
 - Branch name generation
-- Execution and conversation creation
+- Execution and conversation creation (one per repo, in parallel)
 """
 
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import re
@@ -23,6 +24,7 @@ from openhands.app_server.utils.logger import openhands_logger as logger
 from .correlation import build_log_context
 from .execution_models import ExecutionState, SourceType
 from .execution_service import ExecutionService
+from .execution_store import JiraProjectRepositoryRecord
 from .openhands_client import OpenHandsClient
 from .prompt_renderer import render_prompt
 
@@ -54,16 +56,20 @@ def verify_jira_signature(
 
 
 
-def compute_jira_event_id(payload: dict) -> str:
+def compute_jira_event_id(payload: dict, repo: str | None = None) -> str:
     """Compute a deterministic event ID for idempotency.
 
 
     Combines the webhook event type, issue ID, and timestamp.
+    When processing multiple repos for the same issue, a repo suffix
+    is appended so each repo gets its own unique event ID.
     """
     webhook_event = payload.get('webhookEvent', '')
     issue_id = payload.get('issue', {}).get('id', '')
     timestamp = payload.get('timestamp', 0)
     raw = f'{webhook_event}:{issue_id}:{timestamp}'
+    if repo:
+        raw = f'{raw}:{repo}'
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
@@ -216,13 +222,9 @@ class JiraAutomationService:
     """Processes Jira issue webhook events.
 
 
-    Flow:
-    1. Verify webhook signature
-    2. Compute event ID for idempotency
-    3. Extract issue data and repository from issue payload
-    4. Create execution record
-    5. Generate branch name
-    6. Create OpenHands conversation
+    Resolves repositories from the ``jira_project_repositories`` table
+    (one per row for the same project key).  For each repo a separate
+    execution and conversation is created in parallel.
     """
 
 
@@ -230,137 +232,67 @@ class JiraAutomationService:
     openhands_client: OpenHandsClient
 
 
-    async def process_issue_created(
+    async def _process_single_repo(
         self,
+        *,
         payload: dict,
         state,
-        request=None,
+        request,
+        issue_data: dict,
+        repo_record: JiraProjectRepositoryRecord,
+        base_url: str,
     ) -> dict:
-        """Process a jira:issue_created webhook event.
+        """Create execution + conversation for a single repository.
 
-
-        Repository selection comes exclusively from the Jira issue payload.
-        The repository field must contain an ``owner/repository`` string.
-
-
-        Returns a dict with execution_id and status for the webhook response.
+        Each repo gets its own deterministic event ID (so multiple repos
+        for the same issue do not collide on the ``source_event_id``
+        unique constraint), its own branch name, and its own prompt.
+        Returns a result dict matching the legacy single-repo format.
         """
-        # Extract issue data
-        issue_data = extract_jira_issue_data(payload)
-        if not issue_data:
-            logger.warning('[Automation] Jira webhook: missing issue key')
-            return {
-                'status': 'skipped',
-                'reason': 'Missing issue key in payload',
-            }
-
-
         issue_key = issue_data['issue_key']
         summary = issue_data['summary']
+        repo_str = f'{repo_record.owner}/{repo_record.repository}'
+        default_branch = repo_record.default_branch or 'main'
 
 
-        # Extract repository from the Jira issue payload
-        repository_str = extract_jira_repository(payload)
-        if not repository_str:
-            logger.error(
-                '[Automation] Jira webhook: repository field missing in '
-                f'issue {issue_key}. Expected a repository field (e.g. '
-                'customfield_10010) with value in "owner/repository" format.',
-                extra=build_log_context(
-                    execution_id='',
-                    jira_issue_key=issue_key,
-                ),
-            )
-            return {
-                'status': 'failed',
-                'issue_key': issue_key,
-                'error': (
-                    'Repository field missing in Jira issue. '
-                    'Ensure the issue has a repository field '
-                    '(e.g. customfield_10010) set.'
-                ),
-            }
+        # Per-repo event ID for idempotency (avoids UNIQUE constraint collision)
+        event_id = compute_jira_event_id(payload, repo=repo_str)
 
 
-        # Validate format: owner/repository
-        if not _validate_repository_format(repository_str):
-            logger.error(
-                '[Automation] Jira webhook: invalid repository format in '
-                f'issue {issue_key}: "{repository_str}". '
-                'Expected "owner/repository" format.',
-                extra=build_log_context(
-                    execution_id='',
-                    jira_issue_key=issue_key,
-                    repository=repository_str,
-                ),
-            )
-            return {
-                'status': 'failed',
-                'issue_key': issue_key,
-                'error': (
-                    f'Invalid repository format: "{repository_str}". '
-                    'Expected format: "owner/repository".'
-                ),
-            }
-
-
-        logger.info(
-            f'[Automation] Resolved repository for {issue_key}: '
-            f'{repository_str} (from issue payload)',
-            extra=build_log_context(
-                execution_id='',
-                jira_issue_key=issue_key,
-                repository=repository_str,
-            ),
-        )
-
-
-        # Idempotency: compute event ID
-        event_id = compute_jira_event_id(payload)
-
-
-        # Generate branch name
         branch = generate_jira_branch_name(
             issue_key, issue_data['issue_type'], summary
         )
 
 
-        # Create execution record with repository info
         execution_record, is_new = await self.execution_service.create_execution(
             source_type=SourceType.JIRA,
             source_event_id=event_id,
             jira_issue_key=issue_key,
             branch=branch,
-            repository=repository_str,
+            repository=repo_str,
         )
 
 
-        # Skip if duplicate
         if not is_new:
             return {
                 'status': 'duplicate',
                 'execution_id': execution_record.execution_id,
                 'issue_key': issue_key,
+                'repository': repo_str,
             }
 
 
         execution_id = execution_record.execution_id
 
 
-        # Enqueue as RECEIVED → QUEUED
         await self.execution_service.transition_state(
             execution_id, ExecutionState.QUEUED
         )
 
 
-        default_branch = 'main'
-
-
-        # Build the full comment endpoint URL from the incoming request
-        base_url = str(request.base_url).rstrip('/')
         comment_endpoint = f'{base_url}/api/v1/jira/start/comment'
 
-        # Build prompt from template with full context
+
         prompt = render_prompt(
             'jira_new_conversation.j2',
             issue_key=issue_key,
@@ -369,16 +301,13 @@ class JiraAutomationService:
             priority=issue_data['priority'],
             reporter=issue_data['reporter'],
             description=issue_data['description'],
-            repository=repository_str,
+            repository=repo_str,
             default_branch=default_branch,
             branch=branch,
             comment_endpoint=comment_endpoint,
         )
 
 
-
-
-        # Create OpenHands conversation
         conversation_id = await self.openhands_client.create_conversation(
             state=state,
             request=request,
@@ -386,13 +315,12 @@ class JiraAutomationService:
             title=f'[Automation] Jira {issue_key}',
             execution_id=execution_id,
             jira_issue_key=issue_key,
-            repository=repository_str,
+            repository=repo_str,
             branch=default_branch,
         )
 
 
         if conversation_id:
-            # Transition to RUNNING
             await self.execution_service.transition_state(
                 execution_id,
                 ExecutionState.RUNNING,
@@ -403,17 +331,123 @@ class JiraAutomationService:
                 'execution_id': execution_id,
                 'conversation_id': conversation_id,
                 'issue_key': issue_key,
-                'repository': repository_str,
+                'repository': repo_str,
             }
-        else:
-            await self.execution_service.transition_state(
-                execution_id,
-                ExecutionState.FAILED,
-                error_message='Failed to create OpenHands conversation',
+
+
+        await self.execution_service.transition_state(
+            execution_id,
+            ExecutionState.FAILED,
+            error_message='Failed to create OpenHands conversation',
+        )
+        return {
+            'status': 'failed',
+            'execution_id': execution_id,
+            'issue_key': issue_key,
+            'repository': repo_str,
+            'error': 'Failed to create conversation',
+        }
+
+
+    async def process_issue_created(
+        self,
+        payload: dict,
+        state,
+        request=None,
+    ) -> dict:
+        """Process a ``jira:issue_created`` webhook event.
+
+
+        Repositories are resolved from the ``jira_project_repositories``
+        table by project key.  For each repository a separate execution
+        and conversation is created **in parallel** via ``asyncio.gather``.
+
+        If the project has a single repo configured the return value is a
+        single-result dict (backward compatible).  With multiple repos the
+        return value is ``{'status': 'multi', 'executions': [...]}``.
+        """
+        issue_data = extract_jira_issue_data(payload)
+        if not issue_data:
+            logger.warning('[Automation] Jira webhook: missing issue key')
+            return {
+                'status': 'skipped',
+                'reason': 'Missing issue key in payload',
+            }
+
+        issue_key = issue_data['issue_key']
+        project_key = extract_jira_project_key(payload)
+
+        if not project_key:
+            logger.error(
+                '[Automation] Jira webhook: missing project key in '
+                f'issue {issue_key}',
+                extra=build_log_context(
+                    execution_id='',
+                    jira_issue_key=issue_key,
+                ),
             )
             return {
                 'status': 'failed',
-                'execution_id': execution_id,
                 'issue_key': issue_key,
-                'error': 'Failed to create conversation',
+                'error': 'Missing project key in Jira payload',
             }
+
+        # Resolve repositories from the DB table
+        repo_records = (
+            await self.execution_service.store.get_jira_project_repos_by_project_key(
+                project_key
+            )
+        )
+
+        if not repo_records:
+            logger.error(
+                '[Automation] Jira webhook: no repositories configured for '
+                f'project {project_key} (issue {issue_key}). '
+                'Add entries via POST /api/v1/admin/jira-project-repos.',
+                extra=build_log_context(
+                    execution_id='',
+                    jira_issue_key=issue_key,
+                ),
+            )
+            return {
+                'status': 'failed',
+                'issue_key': issue_key,
+                'error': (
+                    f'No repositories configured for project '
+                    f'"{project_key}". Please configure at least one '
+                    'repository mapping via the admin API.'
+                ),
+            }
+
+        logger.info(
+            f'[Automation] Resolved {len(repo_records)} repo(s) for '
+            f'{issue_key} (project={project_key}): '
+            f'{", ".join(f"{r.owner}/{r.repository}" for r in repo_records)}',
+            extra=build_log_context(
+                execution_id='',
+                jira_issue_key=issue_key,
+            ),
+        )
+
+        base_url = str(request.base_url).rstrip('/')
+
+        # Process every repo in parallel
+        tasks = [
+            self._process_single_repo(
+                payload=payload,
+                state=state,
+                request=request,
+                issue_data=issue_data,
+                repo_record=repo,
+                base_url=base_url,
+            )
+            for repo in repo_records
+        ]
+        results = await asyncio.gather(*tasks)
+
+        # Single repo → backward-compatible single result
+        if len(results) == 1:
+            return results[0]
+
+        # Multiple repos → aggregated response
+        return {'status': 'multi', 'executions': results}

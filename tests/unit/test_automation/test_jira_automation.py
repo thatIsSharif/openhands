@@ -4,6 +4,8 @@ import hashlib
 import hmac
 import json
 
+import pytest
+
 from openhands.app_server.automation.jira_automation_service import (
     _validate_repository_format,
     compute_jira_event_id,
@@ -274,3 +276,301 @@ class TestValidateRepositoryFormat:
 
     def test_invalid_empty_string(self):
         assert _validate_repository_format('') is False
+
+
+class TestComputeJiraEventIdWithRepo:
+    """Tests for compute_jira_event_id with repo suffix."""
+
+    def test_different_repos_get_different_ids(self):
+        payload = {
+            'webhookEvent': 'jira:issue_created',
+            'issue': {'id': '12345'},
+            'timestamp': 1000000,
+        }
+        id1 = compute_jira_event_id(payload, repo='owner/repo-a')
+        id2 = compute_jira_event_id(payload, repo='owner/repo-b')
+        assert id1 != id2, 'Different repos must produce different event IDs'
+
+    def test_repo_suffix_is_deterministic(self):
+        payload = {
+            'webhookEvent': 'jira:issue_created',
+            'issue': {'id': '12345'},
+            'timestamp': 1000000,
+        }
+        id1 = compute_jira_event_id(payload, repo='owner/repo')
+        id2 = compute_jira_event_id(payload, repo='owner/repo')
+        assert id1 == id2
+
+    def test_without_repo_matches_legacy_behavior(self):
+        payload = {
+            'webhookEvent': 'jira:issue_created',
+            'issue': {'id': '12345'},
+            'timestamp': 1000000,
+        }
+        legacy_id = compute_jira_event_id(payload)
+        no_repo_id = compute_jira_event_id(payload, repo=None)
+        assert legacy_id == no_repo_id
+
+    def test_repo_id_differs_from_no_repo_id(self):
+        payload = {
+            'webhookEvent': 'jira:issue_created',
+            'issue': {'id': '12345'},
+            'timestamp': 1000000,
+        }
+        without = compute_jira_event_id(payload)
+        with_repo = compute_jira_event_id(payload, repo='owner/repo')
+        assert without != with_repo, 'Repo suffix must change the event ID'
+
+
+class TestProcessIssueCreatedMultiRepo:
+    """Tests for the multi-repo flow in JiraAutomationService."""
+
+    @pytest.mark.asyncio
+    async def test_repo_resolution_from_db(self):
+        """Verify that process_issue_created queries the DB for repos
+        instead of extracting from Jira custom fields."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from openhands.app_server.automation.execution_models import (
+            JiraProjectRepositoryRecord,
+        )
+        from openhands.app_server.automation.jira_automation_service import (
+            JiraAutomationService,
+        )
+
+        payload = {
+            'webhookEvent': 'jira:issue_created',
+            'issue_event_type_name': 'issue_assigned',
+            'issue': {
+                'id': '10001',
+                'key': 'KAN-42',
+                'fields': {
+                    'summary': 'Multi-repo task',
+                    'description': 'Needs backend and frontend changes',
+                    'issuetype': {'name': 'Story'},
+                    'priority': {'name': 'Medium'},
+                    'reporter': {'displayName': 'Dev'},
+                    'labels': [],
+                    'project': {'key': 'KAN'},
+                    # NOTE: no customfield_* repository field!
+                },
+            },
+            'changelog': {
+                'items': [{'field': 'assignee', 'to': 'target-user'}]
+            },
+            'timestamp': 2000000,
+        }
+
+        # Mock two repos in the DB
+        repo_backend = JiraProjectRepositoryRecord(
+            id=1,
+            jira_project_key='KAN',
+            repository='workflow-engine',
+            owner='thatIsSharif',
+            default_branch='main',
+        )
+        repo_frontend = JiraProjectRepositoryRecord(
+            id=2,
+            jira_project_key='KAN',
+            repository='dsd-frontend',
+            owner='thatIsSharif',
+            default_branch='main',
+        )
+
+        mock_store = AsyncMock()
+        mock_store.get_jira_project_repos_by_project_key = AsyncMock(
+            return_value=[repo_backend, repo_frontend]
+        )
+
+        mock_execution_service = MagicMock()
+        mock_execution_service.store = mock_store
+        mock_execution_service.create_execution = AsyncMock(
+            side_effect=[
+                (MagicMock(execution_id='exec-1'), True),
+                (MagicMock(execution_id='exec-2'), True),
+            ]
+        )
+        mock_execution_service.transition_state = AsyncMock()
+
+        mock_openhands_client = MagicMock()
+        mock_openhands_client.create_conversation = AsyncMock(
+            side_effect=['conv-1', 'conv-2']
+        )
+
+        service = JiraAutomationService(
+            execution_service=mock_execution_service,
+            openhands_client=mock_openhands_client,
+        )
+
+        mock_request = MagicMock()
+        mock_request.base_url = 'http://localhost:8000'
+        mock_state = MagicMock()
+
+        result = await service.process_issue_created(
+            payload=payload,
+            state=mock_state,
+            request=mock_request,
+        )
+
+        # Should be multi-repo result
+        assert result['status'] == 'multi'
+        assert len(result['executions']) == 2
+
+        # Verify both repos were queried
+        mock_store.get_jira_project_repos_by_project_key.assert_called_once_with(
+            'KAN'
+        )
+
+        # Verify two executions were created with different repo strings
+        create_calls = mock_execution_service.create_execution.call_args_list
+        assert len(create_calls) == 2
+        repos_used = [call[1]['repository'] for call in create_calls]
+        assert 'thatIsSharif/workflow-engine' in repos_used
+        assert 'thatIsSharif/dsd-frontend' in repos_used
+
+        # Verify each execution got a unique source_event_id
+        event_ids = [call[1]['source_event_id'] for call in create_calls]
+        assert event_ids[0] != event_ids[1]
+
+        # Verify two conversations were created
+        assert mock_openhands_client.create_conversation.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_single_repo_still_works(self):
+        """When the DB has only 1 repo, result should be backward-compatible
+        (single dict, not multi)."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from openhands.app_server.automation.execution_models import (
+            JiraProjectRepositoryRecord,
+        )
+        from openhands.app_server.automation.jira_automation_service import (
+            JiraAutomationService,
+        )
+
+        payload = {
+            'webhookEvent': 'jira:issue_created',
+            'issue_event_type_name': 'issue_assigned',
+            'issue': {
+                'id': '10002',
+                'key': 'KAN-43',
+                'fields': {
+                    'summary': 'Single repo task',
+                    'description': 'Only backend change',
+                    'issuetype': {'name': 'Task'},
+                    'priority': {'name': 'High'},
+                    'reporter': {'displayName': 'Dev'},
+                    'labels': [],
+                    'project': {'key': 'KAN'},
+                },
+            },
+            'changelog': {
+                'items': [{'field': 'assignee', 'to': 'target-user'}]
+            },
+            'timestamp': 3000000,
+        }
+
+        repo_single = JiraProjectRepositoryRecord(
+            id=3,
+            jira_project_key='KAN',
+            repository='workflow-engine',
+            owner='thatIsSharif',
+            default_branch='main',
+        )
+
+        mock_store = AsyncMock()
+        mock_store.get_jira_project_repos_by_project_key = AsyncMock(
+            return_value=[repo_single]
+        )
+
+        mock_execution_service = MagicMock()
+        mock_execution_service.store = mock_store
+        mock_execution_service.create_execution = AsyncMock(
+            return_value=(MagicMock(execution_id='exec-3'), True)
+        )
+        mock_execution_service.transition_state = AsyncMock()
+
+        mock_openhands_client = MagicMock()
+        mock_openhands_client.create_conversation = AsyncMock(
+            return_value='conv-3'
+        )
+
+        service = JiraAutomationService(
+            execution_service=mock_execution_service,
+            openhands_client=mock_openhands_client,
+        )
+
+        mock_request = MagicMock()
+        mock_request.base_url = 'http://localhost:8000'
+        mock_state = MagicMock()
+
+        result = await service.process_issue_created(
+            payload=payload,
+            state=mock_state,
+            request=mock_request,
+        )
+
+        # Single repo -> backward-compatible single result
+        assert result['status'] == 'running'
+        assert result['execution_id'] == 'exec-3'
+        assert result['repository'] == 'thatIsSharif/workflow-engine'
+
+    @pytest.mark.asyncio
+    async def test_no_repos_configured_returns_error(self):
+        """When no repos are configured for the project, return an error."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from openhands.app_server.automation.jira_automation_service import (
+            JiraAutomationService,
+        )
+
+        payload = {
+            'webhookEvent': 'jira:issue_created',
+            'issue_event_type_name': 'issue_assigned',
+            'issue': {
+                'id': '10003',
+                'key': 'UNKNOWN-1',
+                'fields': {
+                    'summary': 'No repo task',
+                    'description': 'No repos configured',
+                    'issuetype': {'name': 'Task'},
+                    'priority': {'name': 'Low'},
+                    'reporter': {'displayName': 'Dev'},
+                    'labels': [],
+                    'project': {'key': 'UNKNOWN'},
+                },
+            },
+            'changelog': {
+                'items': [{'field': 'assignee', 'to': 'target-user'}]
+            },
+            'timestamp': 4000000,
+        }
+
+        mock_store = AsyncMock()
+        mock_store.get_jira_project_repos_by_project_key = AsyncMock(
+            return_value=[]
+        )
+
+        mock_execution_service = MagicMock()
+        mock_execution_service.store = mock_store
+
+        mock_openhands_client = MagicMock()
+
+        service = JiraAutomationService(
+            execution_service=mock_execution_service,
+            openhands_client=mock_openhands_client,
+        )
+
+        mock_request = MagicMock()
+        mock_request.base_url = 'http://localhost:8000'
+        mock_state = MagicMock()
+
+        result = await service.process_issue_created(
+            payload=payload,
+            state=mock_state,
+            request=mock_request,
+        )
+
+        assert result['status'] == 'failed'
+        assert 'No repositories configured' in result['error']
+        assert mock_openhands_client.create_conversation.call_count == 0
