@@ -322,13 +322,16 @@ class TestComputeJiraEventIdWithRepo:
         assert without != with_repo, 'Repo suffix must change the event ID'
 
 
+
+
 class TestProcessIssueCreatedMultiRepo:
-    """Tests for the multi-repo flow in JiraAutomationService."""
+    """Tests for the multi-repo flow in JiraAutomationService (two-phase)."""
 
     @pytest.mark.asyncio
-    async def test_repo_resolution_from_db(self):
-        """Verify that process_issue_created queries the DB for repos
-        instead of extracting from Jira custom fields."""
+    async def test_multi_repo_parallel_execution_then_sequential_conversations(self):
+        """Phase 1 (parallel): execution creation for each repo.
+        Phase 2 (sequential): conversation creation one at a time.
+        """
         from unittest.mock import AsyncMock, MagicMock
 
         from openhands.app_server.automation.execution_models import (
@@ -352,7 +355,6 @@ class TestProcessIssueCreatedMultiRepo:
                     'reporter': {'displayName': 'Dev'},
                     'labels': [],
                     'project': {'key': 'KAN'},
-                    # NOTE: no customfield_* repository field!
                 },
             },
             'changelog': {
@@ -361,19 +363,14 @@ class TestProcessIssueCreatedMultiRepo:
             'timestamp': 2000000,
         }
 
-        # Mock two repos in the DB
         repo_backend = JiraProjectRepositoryRecord(
-            id=1,
-            jira_project_key='KAN',
-            repository='workflow-engine',
-            owner='thatIsSharif',
+            id=1, jira_project_key='KAN',
+            repository='workflow-engine', owner='thatIsSharif',
             default_branch='main',
         )
         repo_frontend = JiraProjectRepositoryRecord(
-            id=2,
-            jira_project_key='KAN',
-            repository='dsd-frontend',
-            owner='thatIsSharif',
+            id=2, jira_project_key='KAN',
+            repository='dsd-frontend', owner='thatIsSharif',
             default_branch='main',
         )
 
@@ -382,12 +379,15 @@ class TestProcessIssueCreatedMultiRepo:
             return_value=[repo_backend, repo_frontend]
         )
 
+        exec_record_1 = MagicMock(execution_id='exec-1')
+        exec_record_2 = MagicMock(execution_id='exec-2')
+
         mock_execution_service = MagicMock()
         mock_execution_service.store = mock_store
         mock_execution_service.create_execution = AsyncMock(
             side_effect=[
-                (MagicMock(execution_id='exec-1'), True),
-                (MagicMock(execution_id='exec-2'), True),
+                (exec_record_1, True),
+                (exec_record_2, True),
             ]
         )
         mock_execution_service.transition_state = AsyncMock()
@@ -412,28 +412,44 @@ class TestProcessIssueCreatedMultiRepo:
             request=mock_request,
         )
 
-        # Should be multi-repo result
+        # Multi-repo result
         assert result['status'] == 'multi'
         assert len(result['executions']) == 2
 
-        # Verify both repos were queried
-        mock_store.get_jira_project_repos_by_project_key.assert_called_once_with(
-            'KAN'
-        )
+        # Verify repos were resolved from DB (not custom field)
+        mock_store.get_jira_project_repos_by_project_key.assert_called_once_with('KAN')
 
-        # Verify two executions were created with different repo strings
-        create_calls = mock_execution_service.create_execution.call_args_list
-        assert len(create_calls) == 2
-        repos_used = [call[1]['repository'] for call in create_calls]
+        # Phase 1: two executions created with different repos
+        assert mock_execution_service.create_execution.call_count == 2
+        repos_used = [
+            call[1]['repository']
+            for call in mock_execution_service.create_execution.call_args_list
+        ]
         assert 'thatIsSharif/workflow-engine' in repos_used
         assert 'thatIsSharif/dsd-frontend' in repos_used
 
-        # Verify each execution got a unique source_event_id
-        event_ids = [call[1]['source_event_id'] for call in create_calls]
+        # Each repo gets a unique event ID
+        event_ids = [
+            call[1]['source_event_id']
+            for call in mock_execution_service.create_execution.call_args_list
+        ]
         assert event_ids[0] != event_ids[1]
 
-        # Verify two conversations were created
+        # Phase 2: two conversations created (sequentially)
         assert mock_openhands_client.create_conversation.call_count == 2
+
+        # Transition to QUEUED was called for each (parallel),
+        # then RUNNING for each (sequential)
+        queued_calls = [
+            c for c in mock_execution_service.transition_state.call_args_list
+            if c[0][1].value == 'QUEUED'
+        ]
+        running_calls = [
+            c for c in mock_execution_service.transition_state.call_args_list
+            if c[0][1].value == 'RUNNING'
+        ]
+        assert len(queued_calls) == 2
+        assert len(running_calls) == 2
 
     @pytest.mark.asyncio
     async def test_single_repo_still_works(self):
@@ -471,10 +487,8 @@ class TestProcessIssueCreatedMultiRepo:
         }
 
         repo_single = JiraProjectRepositoryRecord(
-            id=3,
-            jira_project_key='KAN',
-            repository='workflow-engine',
-            owner='thatIsSharif',
+            id=3, jira_project_key='KAN',
+            repository='workflow-engine', owner='thatIsSharif',
             default_branch='main',
         )
 
@@ -510,7 +524,7 @@ class TestProcessIssueCreatedMultiRepo:
             request=mock_request,
         )
 
-        # Single repo -> backward-compatible single result
+        # Single repo -> backward-compatible single result dict
         assert result['status'] == 'running'
         assert result['execution_id'] == 'exec-3'
         assert result['repository'] == 'thatIsSharif/workflow-engine'

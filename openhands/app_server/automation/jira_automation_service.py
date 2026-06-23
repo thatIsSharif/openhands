@@ -7,7 +7,14 @@ Handles:
 - Issue data extraction
 - Repository resolution from jira_project_repositories table
 - Branch name generation
-- Execution and conversation creation (one per repo, in parallel)
+- Execution and conversation creation
+
+Design (multi-repo):
+- Phase 1 (parallel via ``asyncio.gather``): create execution records
+  (each uses its own DB session via ``ExecutionStore._get_session``)
+- Phase 2 (sequential): create conversations one at a time
+  (they share the request-scoped DI session; SQLite cannot handle
+   concurrent writes on the same session)
 """
 
 
@@ -224,7 +231,9 @@ class JiraAutomationService:
 
     Resolves repositories from the ``jira_project_repositories`` table
     (one per row for the same project key).  For each repo a separate
-    execution and conversation is created in parallel.
+    execution is created **in parallel** (phase 1), then conversations
+    are created **sequentially** (phase 2) to avoid SQLite transaction
+    conflicts on the request-scoped DI session.
     """
 
 
@@ -232,37 +241,33 @@ class JiraAutomationService:
     openhands_client: OpenHandsClient
 
 
-    async def _process_single_repo(
+    # ── Phase 1 (parallel-safe) ──────────────────────────────────
+
+
+    async def _create_execution_for_repo(
         self,
         *,
         payload: dict,
-        state,
-        request,
         issue_data: dict,
         repo_record: JiraProjectRepositoryRecord,
-        base_url: str,
-    ) -> dict:
-        """Create execution + conversation for a single repository.
+    ) -> dict | None:
+        """Create execution record for one repo (parallel-safe).
 
-        Each repo gets its own deterministic event ID (so multiple repos
-        for the same issue do not collide on the ``source_event_id``
-        unique constraint), its own branch name, and its own prompt.
-        Returns a result dict matching the legacy single-repo format.
+        Each call uses its own DB session via ``ExecutionStore`` so
+        multiple calls can run concurrently via ``asyncio.gather``.
+
+        Returns a result dict with execution metadata, or ``None``
+        when the event is a duplicate.
         """
         issue_key = issue_data['issue_key']
         summary = issue_data['summary']
         repo_str = f'{repo_record.owner}/{repo_record.repository}'
         default_branch = repo_record.default_branch or 'main'
 
-
-        # Per-repo event ID for idempotency (avoids UNIQUE constraint collision)
         event_id = compute_jira_event_id(payload, repo=repo_str)
-
-
         branch = generate_jira_branch_name(
             issue_key, issue_data['issue_type'], summary
         )
-
 
         execution_record, is_new = await self.execution_service.create_execution(
             source_type=SourceType.JIRA,
@@ -272,26 +277,51 @@ class JiraAutomationService:
             repository=repo_str,
         )
 
-
         if not is_new:
-            return {
-                'status': 'duplicate',
-                'execution_id': execution_record.execution_id,
-                'issue_key': issue_key,
-                'repository': repo_str,
-            }
-
-
-        execution_id = execution_record.execution_id
-
+            logger.info(
+                f'[Automation] Duplicate event for {repo_str} '
+                f'(execution {execution_record.execution_id})',
+            )
+            return None
 
         await self.execution_service.transition_state(
-            execution_id, ExecutionState.QUEUED
+            execution_record.execution_id, ExecutionState.QUEUED
         )
 
+        return {
+            'execution_record': execution_record,
+            'repo_str': repo_str,
+            'default_branch': default_branch,
+            'branch': branch,
+        }
+
+
+    # ── Phase 2 (sequential — shares request DI session) ─────────
+
+
+    async def _create_conversation_for_execution(
+        self,
+        *,
+        state,
+        request,
+        issue_data: dict,
+        exec_data: dict,
+        base_url: str,
+    ) -> dict:
+        """Create an OpenHands conversation for one execution.
+
+        Must be called **sequentially** — it shares the request-scoped
+        DI session which cannot handle concurrent writes on SQLite.
+        """
+        issue_key = issue_data['issue_key']
+        summary = issue_data['summary']
+        execution_record = exec_data['execution_record']
+        repo_str = exec_data['repo_str']
+        default_branch = exec_data['default_branch']
+        branch = exec_data['branch']
+        execution_id = execution_record.execution_id
 
         comment_endpoint = f'{base_url}/api/v1/jira/start/comment'
-
 
         prompt = render_prompt(
             'jira_new_conversation.j2',
@@ -307,7 +337,6 @@ class JiraAutomationService:
             comment_endpoint=comment_endpoint,
         )
 
-
         conversation_id = await self.openhands_client.create_conversation(
             state=state,
             request=request,
@@ -318,7 +347,6 @@ class JiraAutomationService:
             repository=repo_str,
             branch=default_branch,
         )
-
 
         if conversation_id:
             await self.execution_service.transition_state(
@@ -334,7 +362,6 @@ class JiraAutomationService:
                 'repository': repo_str,
             }
 
-
         await self.execution_service.transition_state(
             execution_id,
             ExecutionState.FAILED,
@@ -349,6 +376,9 @@ class JiraAutomationService:
         }
 
 
+    # ── Entry point ──────────────────────────────────────────────
+
+
     async def process_issue_created(
         self,
         payload: dict,
@@ -357,10 +387,10 @@ class JiraAutomationService:
     ) -> dict:
         """Process a ``jira:issue_created`` webhook event.
 
-
-        Repositories are resolved from the ``jira_project_repositories``
-        table by project key.  For each repository a separate execution
-        and conversation is created **in parallel** via ``asyncio.gather``.
+        **Phase 1** — Create execution records **in parallel**
+        (each uses its own DB session).
+        **Phase 2** — Create conversations **sequentially**
+        (they share the request-scoped DI session).
 
         If the project has a single repo configured the return value is a
         single-result dict (backward compatible).  With multiple repos the
@@ -392,7 +422,7 @@ class JiraAutomationService:
                 'error': 'Missing project key in Jira payload',
             }
 
-        # Resolve repositories from the DB table
+        # ── Resolve repositories from the DB table ────────────────
         repo_records = (
             await self.execution_service.store.get_jira_project_repos_by_project_key(
                 project_key
@@ -429,25 +459,45 @@ class JiraAutomationService:
             ),
         )
 
-        base_url = str(request.base_url).rstrip('/')
-
-        # Process every repo in parallel
-        tasks = [
-            self._process_single_repo(
+        # ── Phase 1: create executions in parallel ───────────────
+        exec_tasks = [
+            self._create_execution_for_repo(
                 payload=payload,
-                state=state,
-                request=request,
                 issue_data=issue_data,
                 repo_record=repo,
-                base_url=base_url,
             )
             for repo in repo_records
         ]
-        results = await asyncio.gather(*tasks)
+        exec_results: list[dict] = [
+            r for r in await asyncio.gather(*exec_tasks) if r is not None
+        ]
+
+        if not exec_results:
+            logger.info(
+                f'[Automation] All events for {issue_key} were duplicates'
+            )
+            return {
+                'status': 'duplicate',
+                'issue_key': issue_key,
+                'executions': [],
+            }
+
+        # ── Phase 2: create conversations sequentially ───────────
+        base_url = str(request.base_url).rstrip('/')
+        conv_results: list[dict] = []
+        for exec_data in exec_results:
+            result = await self._create_conversation_for_execution(
+                state=state,
+                request=request,
+                issue_data=issue_data,
+                exec_data=exec_data,
+                base_url=base_url,
+            )
+            conv_results.append(result)
 
         # Single repo → backward-compatible single result
-        if len(results) == 1:
-            return results[0]
+        if len(conv_results) == 1:
+            return conv_results[0]
 
         # Multiple repos → aggregated response
-        return {'status': 'multi', 'executions': results}
+        return {'status': 'multi', 'executions': conv_results}
