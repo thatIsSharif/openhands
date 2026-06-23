@@ -366,12 +366,12 @@ class TestProcessIssueCreatedMultiRepo:
         repo_backend = JiraProjectRepositoryRecord(
             id=1, jira_project_key='KAN',
             repository='workflow-engine', owner='thatIsSharif',
-            default_branch='main',
+            default_branch='main', label='backend',
         )
         repo_frontend = JiraProjectRepositoryRecord(
             id=2, jira_project_key='KAN',
             repository='dsd-frontend', owner='thatIsSharif',
-            default_branch='main',
+            default_branch='main', label='frontend',
         )
 
         mock_store = AsyncMock()
@@ -489,7 +489,7 @@ class TestProcessIssueCreatedMultiRepo:
         repo_single = JiraProjectRepositoryRecord(
             id=3, jira_project_key='KAN',
             repository='workflow-engine', owner='thatIsSharif',
-            default_branch='main',
+            default_branch='main', label='backend',
         )
 
         mock_store = AsyncMock()

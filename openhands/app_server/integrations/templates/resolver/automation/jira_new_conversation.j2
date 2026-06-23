@@ -9,23 +9,42 @@ Reporter: {{ reporter }}
 Description:
 {{ description }}
 
-Target Repository: {{ repository }}
+Repository: {{ repository }}
+Repository Label: {{ repo_label }}
 Default Branch: {{ default_branch }}
 Working Branch: {{ branch }}
 
-Requirements:
+## Gate Rule (MUST READ BEFORE ANY WORK)
+
+This repository is labeled "{{ repo_label }}".
+
+Analyze the Jira issue thoroughly — read the title, description, scope, and
+acceptance criteria. Proceed only if you genuinely believe changes are
+required in **this** repository.
+
+Check the Jira issue description for phrases like:
+- "No {{ repo_label }} changes required"
+- "Out of Scope: {{ repo_label }} changes"
+- "{{ repo_label }} changes" listed under "Out of Scope"
+
+If the issue explicitly excludes {{ repo_label }} work:
+   → STOP. Do NOT make any changes.
+   → Post a comment: "No changes needed in {{ repository }} ({{ repo_label }})."
+   → Your job is done.
+
+If the issue requires {{ repo_label }} changes:
+   → Proceed with implementation below.
+
+## Requirements
+
 1. Analyze the Jira issue and understand the requested changes.
-2. Determine whether **this** repository ("{{ repository }}") needs changes.
-   - If the task only affects OTHER repositories, skip this repo entirely
-     (still post a comment saying no changes were needed here).
-   - If changes are needed, proceed with steps below.
-3. Create a branch named "{{ branch }}" from "{{ default_branch }}".
-4. Implement the required changes following the project coding standards.
-5. Run relevant tests, linting, or validation commands whenever applicable.
-6. Commit your changes with clear commit messages referencing the Jira issue key.
-7. Create a pull request targeting "{{ default_branch }}".
-8. Include a clear description of the implementation in the pull request.
-9. After creating the pull request (or determining no changes are needed),
+2. Create a branch named "{{ branch }}" from "{{ default_branch }}".
+3. Implement the required changes following the project coding standards.
+4. Run relevant tests, linting, or validation commands whenever applicable.
+5. Commit your changes with clear commit messages referencing the Jira issue key.
+6. Create a pull request targeting "{{ default_branch }}".
+7. Include a clear description of the implementation in the pull request.
+8. After creating the pull request (or determining no changes are needed),
    post a comment on the Jira issue by sending a POST request to:
    POST {{ comment_endpoint }}
    {

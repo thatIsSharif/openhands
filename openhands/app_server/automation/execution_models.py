@@ -120,6 +120,7 @@ class JiraProjectRepositoryRecord:
     owner: str = ''
     default_branch: str = 'main'
     custom_field_id: str | None = None
+    label: str | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
     github_webhook_secret: str | None = None

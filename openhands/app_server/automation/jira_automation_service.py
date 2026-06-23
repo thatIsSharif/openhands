@@ -291,6 +291,7 @@ class JiraAutomationService:
         return {
             'execution_record': execution_record,
             'repo_str': repo_str,
+            'repo_label': repo_record.label or '',
             'default_branch': default_branch,
             'branch': branch,
         }
@@ -317,6 +318,7 @@ class JiraAutomationService:
         summary = issue_data['summary']
         execution_record = exec_data['execution_record']
         repo_str = exec_data['repo_str']
+        repo_label = exec_data['repo_label']
         default_branch = exec_data['default_branch']
         branch = exec_data['branch']
         execution_id = execution_record.execution_id
@@ -332,6 +334,7 @@ class JiraAutomationService:
             reporter=issue_data['reporter'],
             description=issue_data['description'],
             repository=repo_str,
+            repo_label=repo_label,
             default_branch=default_branch,
             branch=branch,
             comment_endpoint=comment_endpoint,

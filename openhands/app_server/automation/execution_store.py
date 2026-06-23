@@ -371,6 +371,7 @@ class ExecutionStore:
         default_branch: str = 'main',
         custom_field_id: str | None = None,
         github_webhook_secret: str | None = None,
+        label: str | None = None,
     ) -> JiraProjectRepositoryRecord:
         """Create a Jira project → repository mapping.
 
@@ -384,6 +385,7 @@ class ExecutionStore:
             default_branch=default_branch,
             custom_field_id=custom_field_id,
             github_webhook_secret=github_webhook_secret,
+            label=label,
         )
         async with self._get_session() as session:
             session.add(mapping)
@@ -589,6 +591,7 @@ class ExecutionStore:
             owner=mapping.owner,
             default_branch=mapping.default_branch,
             custom_field_id=mapping.custom_field_id,
+            label=mapping.label,
             created_at=mapping.created_at,
             updated_at=mapping.updated_at,
             github_webhook_secret=mapping.github_webhook_secret,
