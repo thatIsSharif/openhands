@@ -334,6 +334,10 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
                 )
             )
 
+            # Apply task-level max_iterations override (for automation conversations)
+            if request.max_iterations is not None:
+                start_conversation_request.max_iterations = request.max_iterations
+
             # update status
             task.status = AppConversationStartTaskStatus.STARTING_CONVERSATION
             task.agent_server_url = agent_server_url

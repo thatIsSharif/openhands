@@ -13,9 +13,13 @@ from openhands.app_server.app_conversation.app_conversation_models import (
     AppConversationStartTaskStatus,
     ConversationTrigger,
 )
+from openhands.app_server.automation.budget_enforcement_processor import (
+    BudgetEnforcementProcessor,
+)
 from openhands.app_server.automation.callback_processors import (
     AutomationEventCallbackProcessor,
 )
+from openhands.app_server.automation.execution_store import ExecutionStore
 from openhands.app_server.config import (
     get_app_conversation_service,
 )
@@ -43,6 +47,22 @@ class OpenHandsClient:
         repository: str | None = None,
         branch: str | None = None,
     ) -> str | None:
+        # Look up execution record for task-level rate limits
+        max_iterations: int | None = None
+        max_budget: float | None = None
+        if execution_id:
+            store = ExecutionStore()
+            execution_record = await store.get_execution(execution_id)
+            if execution_record:
+                max_iterations = execution_record.max_iterations
+                max_budget = execution_record.max_budget
+
+        # Build the processor list
+        processors = [AutomationEventCallbackProcessor()]
+
+        # Register budget enforcement if a max_budget is configured
+        if max_budget is not None and max_budget > 0:
+            processors.append(BudgetEnforcementProcessor())
 
         start_request = AppConversationStartRequest(
             trigger=ConversationTrigger.AUTOMATION,
@@ -60,9 +80,10 @@ class OpenHandsClient:
                 ]
             ),
 
-            processors=[
-                AutomationEventCallbackProcessor(),
-            ]
+            max_iterations=max_iterations,
+            max_budget_per_task=max_budget,
+
+            processors=processors,
         )
 
         async with get_app_conversation_service(

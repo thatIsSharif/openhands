@@ -66,9 +66,45 @@ class ExecutionStore:
         github_pr_id: int | None = None,
         repository: str | None = None,
         branch: str | None = None,
+        max_iterations: int | None = None,
+        max_budget: float | None = None,
     ) -> ExecutionRecord:
-        """Create a new execution record in RECEIVED state."""
+        """Create a new execution record in RECEIVED state.
+
+        Args:
+            execution_id: Unique execution identifier.
+            source_type: Source that triggered the execution.
+            source_event_id: Optional source event ID for idempotency.
+            jira_issue_key: Optional Jira issue key.
+            github_pr_id: Optional GitHub PR number.
+            repository: Optional repository name (owner/repo).
+            branch: Optional branch name.
+            max_iterations: Optional max iterations override for the task.
+                Falls back to OH_AUTOMATION_DEFAULT_MAX_ITERATIONS env var.
+            max_budget: Optional max budget override for the task (in USD).
+                Falls back to OH_AUTOMATION_DEFAULT_MAX_BUDGET env var.
+        """
+        import os
+
         state = ExecutionState.RECEIVED.value
+
+        # Apply env var defaults if not explicitly provided
+        if max_iterations is None:
+            env_val = os.environ.get('OH_AUTOMATION_DEFAULT_MAX_ITERATIONS')
+            if env_val is not None:
+                try:
+                    max_iterations = int(env_val)
+                except (ValueError, TypeError):
+                    pass  # Silently ignore invalid env var values
+
+        if max_budget is None:
+            env_val = os.environ.get('OH_AUTOMATION_DEFAULT_MAX_BUDGET')
+            if env_val is not None:
+                try:
+                    max_budget = float(env_val)
+                except (ValueError, TypeError):
+                    pass  # Silently ignore invalid env var values
+
         execution = StoredExecution(
             execution_id=execution_id,
             source_type=source_type.value
@@ -80,6 +116,8 @@ class ExecutionStore:
             github_pr_id=github_pr_id,
             repository=repository,
             branch=branch,
+            max_iterations=max_iterations,
+            max_budget=max_budget,
         )
         async with self._get_session() as session:
             session.add(execution)
@@ -535,6 +573,8 @@ class ExecutionStore:
             github_pr_id=execution.github_pr_id,
             repository=execution.repository,
             branch=execution.branch,
+            max_iterations=execution.max_iterations,
+            max_budget=execution.max_budget,
             conversation_id=execution.conversation_id,
             error_message=execution.error_message,
             started_at=execution.started_at,

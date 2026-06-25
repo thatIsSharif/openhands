@@ -211,6 +211,24 @@ class AppConversationStartRequest(OpenHandsModel):
         ),
     )
 
+    # Task-level rate limit overrides for automation conversations.
+    # When set, these override the user's global settings for this conversation.
+    # When None, the user's global settings are used as-is.
+    max_iterations: int | None = Field(
+        default=None,
+        description=(
+            'Override max iterations for this task. '
+            "When None, the user's global max_iterations is used."
+        ),
+    )
+    max_budget_per_task: float | None = Field(
+        default=None,
+        description=(
+            'Override max budget (in USD) for this task. '
+            'When None, no budget enforcement is applied.'
+        ),
+    )
+
     # Secrets passed directly via API at conversation start time
     secrets: dict[str, SecretStr] | None = Field(
         default=None,
