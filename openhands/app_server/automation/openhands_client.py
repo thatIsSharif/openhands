@@ -42,6 +42,8 @@ class OpenHandsClient:
         pr_number: int | None = None,
         repository: str | None = None,
         branch: str | None = None,
+        max_iterations: int | None = None,  # NEW: Max agent turns
+        max_budget_per_task: float | None = None,  # NEW: Max $ per task
     ) -> str | None:
 
         start_request = AppConversationStartRequest(
@@ -63,6 +65,8 @@ class OpenHandsClient:
             processors=[
                 AutomationEventCallbackProcessor(),
             ],
+            max_iterations=max_iterations,
+            max_budget_per_task=max_budget_per_task,
         )
 
         async with get_app_conversation_service(

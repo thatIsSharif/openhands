@@ -161,7 +161,7 @@ async def _process_jira_event(
         result = await jira_service.process_issue_created(
             payload=payload,
             state=request.state,
-            request=request,
+            request=request
         )
 
         if result.get('status') == 'multi':
