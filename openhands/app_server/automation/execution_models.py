@@ -52,6 +52,8 @@ class ExecutionRecord:
     github_pr_id: int | None = None
     repository: str | None = None
     branch: str | None = None
+    max_iterations: int | None = None
+    max_budget: float | None = None
     conversation_id: str | None = None
     error_message: str | None = None
     started_at: datetime | None = None

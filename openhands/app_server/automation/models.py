@@ -32,6 +32,8 @@ class StoredExecution(Base):
     github_pr_id: Mapped[int | None] = mapped_column(nullable=True)
     repository: Mapped[str | None] = mapped_column(String(255), nullable=True)
     branch: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    max_iterations: Mapped[int | None] = mapped_column(nullable=True)
+    max_budget: Mapped[float | None] = mapped_column(nullable=True)
     conversation_id: Mapped[str | None] = mapped_column(
         String(255), nullable=True, index=True
     )
