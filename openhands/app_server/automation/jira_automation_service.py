@@ -1,6 +1,5 @@
 """Jira automation service - processes jira:issue_created webhook events.
 
-
 Handles:
 - Webhook signature verification (HMAC-SHA256)
 - Event ID computation for idempotency
@@ -8,8 +7,8 @@ Handles:
 - Repository extraction from Jira issue payload
 - Branch name generation
 - Execution and conversation creation
+- Multi-repository support (backend + frontend)
 """
-
 
 from __future__ import annotations
 
@@ -27,8 +26,6 @@ from .openhands_client import OpenHandsClient
 from .prompt_renderer import render_prompt
 
 JIRA_WEBHOOK_EVENTS = frozenset({'jira:issue_created', 'jira:issue_updated'})
-
-
 
 
 def verify_jira_signature(
@@ -52,11 +49,8 @@ def verify_jira_signature(
     return hmac.compare_digest(parts[1], expected)
 
 
-
-
 def compute_jira_event_id(payload: dict) -> str:
     """Compute a deterministic event ID for idempotency.
-
 
     Combines the webhook event type, issue ID, and timestamp.
     """
@@ -67,13 +61,10 @@ def compute_jira_event_id(payload: dict) -> str:
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
-
-
 def extract_jira_issue_data(
     payload: dict,
 ) -> dict | None:
     """Extract issue metadata from a Jira webhook payload.
-
 
     Returns dict with keys: issue_key, summary, description, issue_type,
     priority, reporter, labels, project_key.
@@ -84,10 +75,8 @@ def extract_jira_issue_data(
     if not issue_key:
         return None
 
-
     fields = issue.get('fields', {})
     project = fields.get('project', {}) or {}
-
 
     return {
         'issue_key': issue_key,
@@ -103,11 +92,8 @@ def extract_jira_issue_data(
     }
 
 
-
-
 def extract_jira_project_key(payload: dict) -> str | None:
     """Extract the Jira project key from a webhook payload.
-
 
     The project key is nested in issue.fields.project.key.
     """
@@ -119,35 +105,27 @@ def extract_jira_project_key(payload: dict) -> str | None:
     )
 
 
-
-
 _JIRA_REPOSITORY_FIELDS = [
     'customfield_10171',
     'repository',
 ]
 
 
-
-
 def extract_jira_repository(payload: dict) -> str | None:
     """Extract the target repository from a Jira issue payload.
 
-
     Repository selection comes exclusively from the Jira issue itself.
     The repository field should contain an ``owner/repository`` string.
-
 
     Returns the repository string (e.g. ``thatIsSharif/workflow-engine``)
     or ``None`` if no repository field is found.
     """
     fields = payload.get('issue', {}).get('fields', {}) or {}
 
-
     for field_id in _JIRA_REPOSITORY_FIELDS:
         value = fields.get(field_id)
         if value is None:
             continue
-
 
         # Support both plain strings and objects with "value" key
         if isinstance(value, dict):
@@ -155,14 +133,10 @@ def extract_jira_repository(payload: dict) -> str | None:
         elif not isinstance(value, str):
             continue
 
-
         if value and isinstance(value, str):
             return value.strip()
 
-
     return None
-
-
 
 
 def generate_jira_branch_name(
@@ -172,9 +146,7 @@ def generate_jira_branch_name(
 ) -> str:
     """Generate a deterministic branch name from Jira issue data.
 
-
     Format: {type}/{ISSUE-KEY}-{summary-slug}
-
 
     Type mapping:
     - Bug → bugfix
@@ -185,22 +157,17 @@ def generate_jira_branch_name(
     """
     type_lower = (issue_type or '').lower()
 
-
     if 'bug' in type_lower:
         prefix = 'bugfix'
     else:
         prefix = 'feature'
-
 
     slug = re.sub(r'[^a-zA-Z0-9\s-]', '', summary)
     slug = re.sub(r'[-\s]+', '-', slug).strip('-').lower()
     if len(slug) > 50:
         slug = slug[:50].rstrip('-')
 
-
     return f'{prefix}/{issue_key}-{slug}'
-
-
 
 
 def _validate_repository_format(repository: str) -> bool:
@@ -209,12 +176,9 @@ def _validate_repository_format(repository: str) -> bool:
     return len(parts) == 2 and bool(parts[0]) and bool(parts[1])
 
 
-
-
 @dataclass
 class JiraAutomationService:
     """Processes Jira issue webhook events.
-
 
     Flow:
     1. Verify webhook signature
@@ -222,13 +186,12 @@ class JiraAutomationService:
     3. Extract issue data and repository from issue payload
     4. Create execution record
     5. Generate branch name
-    6. Create OpenHands conversation
+    6. Create OpenHands conversation with backend repo
+    7. Secondary repos provided in prompt for manual cloning if needed
     """
-
 
     execution_service: ExecutionService
     openhands_client: OpenHandsClient
-
 
     async def process_issue_created(
         self,
@@ -238,10 +201,13 @@ class JiraAutomationService:
     ) -> dict:
         """Process a jira:issue_created webhook event.
 
-
-        Repository selection comes exclusively from the Jira issue payload.
-        The repository field must contain an ``owner/repository`` string.
-
+        Repository selection:
+        - Backend repo is ALWAYS attached as primary
+        - Frontend repo info is included in prompt for manual cloning if needed
+        - Agent reads the ticket and decides what to do:
+          * Backend only → make changes, raise PR
+          * Frontend only → clone frontend manually, make changes, raise PR
+          * Both → make changes in both, raise PRs for both
 
         Returns a dict with execution_id and status for the webhook response.
         """
@@ -254,18 +220,38 @@ class JiraAutomationService:
                 'reason': 'Missing issue key in payload',
             }
 
-
         issue_key = issue_data['issue_key']
         summary = issue_data['summary']
 
+        project_key = extract_jira_project_key(payload)
 
-        # Extract repository from the Jira issue payload
-        repository_str = extract_jira_repository(payload)
-        if not repository_str:
+        if not project_key:
             logger.error(
-                '[Automation] Jira webhook: repository field missing in '
-                f'issue {issue_key}. Expected a repository field (e.g. '
-                'customfield_10010) with value in "owner/repository" format.',
+                '[Automation] Jira webhook: missing project key in '
+                f'issue {issue_key}',
+                extra=build_log_context(
+                    execution_id='',
+                    jira_issue_key=issue_key,
+                ),
+            )
+            return {
+                'status': 'failed',
+                'issue_key': issue_key,
+                'error': 'Missing project key in Jira payload',
+            }
+
+        # ── Resolve repositories from the DB table ────────────────
+        repo_records = (
+            await self.execution_service.store.get_jira_project_repos_by_project_key(
+                project_key
+            )
+        )
+
+        if not repo_records:
+            logger.error(
+                '[Automation] Jira webhook: no repositories configured for '
+                f'project {project_key} (issue {issue_key}). '
+                'Add entries via POST /api/v1/admin/jira-project-repos.',
                 extra=build_log_context(
                     execution_id='',
                     jira_issue_key=issue_key,
@@ -275,65 +261,99 @@ class JiraAutomationService:
                 'status': 'failed',
                 'issue_key': issue_key,
                 'error': (
-                    'Repository field missing in Jira issue. '
-                    'Ensure the issue has a repository field '
-                    '(e.g. customfield_10010) set.'
+                    f'No repositories configured for project '
+                    f'"{project_key}". Please configure at least one '
+                    'repository mapping via the admin API.'
                 ),
             }
-
-
-        # Validate format: owner/repository
-        if not _validate_repository_format(repository_str):
-            logger.error(
-                '[Automation] Jira webhook: invalid repository format in '
-                f'issue {issue_key}: "{repository_str}". '
-                'Expected "owner/repository" format.',
-                extra=build_log_context(
-                    execution_id='',
-                    jira_issue_key=issue_key,
-                    repository=repository_str,
-                ),
-            )
-            return {
-                'status': 'failed',
-                'issue_key': issue_key,
-                'error': (
-                    f'Invalid repository format: "{repository_str}". '
-                    'Expected format: "owner/repository".'
-                ),
-            }
-
 
         logger.info(
-            f'[Automation] Resolved repository for {issue_key}: '
-            f'{repository_str} (from issue payload)',
+            f'[Automation] Resolved {len(repo_records)} repo(s) for '
+            f'{issue_key} (project={project_key}): '
+            f'{", ".join(f"{r.owner}/{r.repository}" for r in repo_records)}',
             extra=build_log_context(
                 execution_id='',
                 jira_issue_key=issue_key,
-                repository=repository_str,
             ),
         )
 
+        # ── Determine primary repository ────────────────────────────
+        # Backend is always the primary (attached)
+        # All other repos are passed to the prompt for potential cloning
+        backend_repo = None
+        other_repos = []
+
+        for repo in repo_records:
+            repo_label = getattr(repo, 'label', None) or 'default'
+            if repo_label.lower() == 'backend' or repo_label.lower() == 'default':
+                if not backend_repo:
+                    backend_repo = repo
+                else:
+                    other_repos.append(repo)
+            else:
+                other_repos.append(repo)
+
+        # Fallback: if no backend label, use first as primary
+        if not backend_repo and repo_records:
+            backend_repo = repo_records[0]
+            other_repos = repo_records[1:]
+        elif backend_repo and backend_repo not in other_repos:
+            # Ensure backend is not in other_repos
+            other_repos = [r for r in other_repos if r != backend_repo]
+
+        if not backend_repo:
+            logger.error(
+                f'[Automation] Jira webhook: no backend repo found for '
+                f'project {project_key} (issue {issue_key})',
+                extra=build_log_context(
+                    execution_id='',
+                    jira_issue_key=issue_key,
+                ),
+            )
+            return {
+                'status': 'failed',
+                'issue_key': issue_key,
+                'error': 'No backend repository found for project',
+            }
+
+        primary_repository = f'{backend_repo.owner}/{backend_repo.repository}'
+        primary_label = getattr(backend_repo, 'label', None) or 'default'
+        default_branch = getattr(backend_repo, 'default_branch', None) or 'main'
+
+        # Build list of all other repos (for cloning if needed)
+        other_repos_info = []
+        for repo in other_repos:
+            repo_info = {
+                'owner': repo.owner,
+                'repository': repo.repository,
+                'branch': getattr(repo, 'default_branch', None) or 'main',
+                'label': getattr(repo, 'label', None) or 'default',
+            }
+            other_repos_info.append(repo_info)
+            logger.info(
+                f'[Automation] Additional repo for {issue_key}: {repo.owner}/{repo.repository} ({repo_info["label"]})',
+                extra=build_log_context(
+                    execution_id='',
+                    jira_issue_key=issue_key,
+                ),
+            )
 
         # Idempotency: compute event ID
         event_id = compute_jira_event_id(payload)
-
 
         # Generate branch name
         branch = generate_jira_branch_name(
             issue_key, issue_data['issue_type'], summary
         )
 
-
-        # Create execution record with repository info
+        # Create execution record with primary repository info
         execution_record, is_new = await self.execution_service.create_execution(
             source_type=SourceType.JIRA,
             source_event_id=event_id,
             jira_issue_key=issue_key,
             branch=branch,
-            repository=repository_str,
+            repository=primary_repository,
         )
-
 
         # Skip if duplicate
         if not is_new:
@@ -343,24 +363,19 @@ class JiraAutomationService:
                 'issue_key': issue_key,
             }
 
-
         execution_id = execution_record.execution_id
-
 
         # Enqueue as RECEIVED → QUEUED
         await self.execution_service.transition_state(
             execution_id, ExecutionState.QUEUED
         )
 
-
-        default_branch = 'main'
-
-
         # Build the full comment endpoint URL from the incoming request
         base_url = str(request.base_url).rstrip('/')
         comment_endpoint = f'{base_url}/api/v1/jira/start/comment'
 
         # Build prompt from template with full context
+        # Include all other repos for potential cloning
         prompt = render_prompt(
             'jira_new_conversation.j2',
             issue_key=issue_key,
@@ -369,16 +384,15 @@ class JiraAutomationService:
             priority=issue_data['priority'],
             reporter=issue_data['reporter'],
             description=issue_data['description'],
-            repository=repository_str,
+            repository=primary_repository,
+            repo_label=primary_label,
             default_branch=default_branch,
             branch=branch,
             comment_endpoint=comment_endpoint,
+            other_repos=other_repos_info,
         )
 
-
-
-
-        # Create OpenHands conversation
+        # Create OpenHands conversation with primary (backend) repository
         conversation_id = await self.openhands_client.create_conversation(
             state=state,
             request=request,
@@ -386,10 +400,9 @@ class JiraAutomationService:
             title=f'[Automation] Jira {issue_key}',
             execution_id=execution_id,
             jira_issue_key=issue_key,
-            repository=repository_str,
+            repository=primary_repository,
             branch=default_branch,
         )
-
 
         if conversation_id:
             # Transition to RUNNING
@@ -403,7 +416,8 @@ class JiraAutomationService:
                 'execution_id': execution_id,
                 'conversation_id': conversation_id,
                 'issue_key': issue_key,
-                'repository': repository_str,
+                'repository': primary_repository,
+                'other_repos': [f'{r["owner"]}/{r["repository"]}' for r in other_repos_info],
             }
         else:
             await self.execution_service.transition_state(

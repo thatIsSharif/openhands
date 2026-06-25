@@ -131,6 +131,12 @@ class StoredJiraProjectRepository(Base):
         comment='Jira custom field ID (e.g. customfield_12345) '
                 'that may contain a per-issue repository override',
     )
+    label: Mapped[str | None] = mapped_column(
+        String(50), nullable=True,
+        comment='Descriptive label for the repo (e.g. backend, frontend). '
+                'Passed into the agent prompt so it can determine '
+                'whether changes are needed in this repo.',
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime,
         server_default=text('CURRENT_TIMESTAMP'),

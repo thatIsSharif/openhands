@@ -1,19 +1,93 @@
-You are working on Jira issue {{ issue_key }}.
+{# Jira Multi-Repository Automation Prompt #}
+
+You are working on {{ repo_label }} repository for Jira issue {{ issue_key }}.
 
 Issue Key: {{ issue_key }}
 Title: {{ title }}
-Issue Type: {{ issue_type }}
-Priority: {{ priority }}
-Reporter: {{ reporter }}
+Type: {{ issue_type }} | Priority: {{ priority }}
 
 Description:
 {{ description }}
 
-Target Repository: {{ repository }}
+Repository: {{ repository }}
+Repository Label: {{ repo_label }}
 Default Branch: {{ default_branch }}
 Working Branch: {{ branch }}
 
-Requirements:
+{% if other_repos %}
+## Other Repositories Available (Clone if needed)
+
+{% for repo in other_repos %}
+### {{ repo.label | title }} Repository
+- **Repository**: {{ repo.owner }}/{{ repo.repository }}
+- **Working Branch**: {{ repo.branch }}
+- **Label**: {{ repo.label }}
+
+To clone this repository when needed, run:
+```
+git clone --depth=1 https://github.com/{{ repo.owner }}/{{ repo.repository }}.git /workspace/{{ repo.label }}
+```
+Base your work off `main`. If `main` does not exist, use `master`.
+{% endfor %}
+{% endif %}
+
+## Gate Rule (MUST READ BEFORE ANY WORK)
+
+This repository is labeled "{{ repo_label }}".
+
+Analyze the Jira issue thoroughly — read the title, description, scope, and
+acceptance criteria. Proceed only if you genuinely believe changes are
+required in **this** repository ({{ repository }}).
+
+Check the Jira issue description for phrases like:
+- "No {{ repo_label }} changes required"
+- "{{ repo_label }} N/A"
+- "Out of Scope: {{ repo_label }} changes"
+- "{{ repo_label }} changes" listed under "Out of Scope"
+- "{{ repo_label }} changes: N/A"
+
+If the issue explicitly excludes {{ repo_label }} work:
+   → STOP. Do NOT make any changes.
+   → Post a comment: "No changes needed in {{ repository }} ({{ repo_label }})."
+   → Your job is done for this repository.
+
+If the issue requires {{ repo_label }} changes:
+   → Proceed with implementation below.
+
+## Requirements
+
+{% if other_repos %}
+### Multi-Repository Workflow
+
+This project has multiple repositories:
+1. **{{ repository }}** ({{ repo_label }}) - This repo is already cloned
+{% for repo in other_repos %}
+{{ loop.index + 1 }}. **{{ repo.owner }}/{{ repo.repository }}** ({{ repo.label }}) - Clone if needed
+{% endfor %}
+
+After completing work on this repository ({{ repo_label }}):
+
+{% for repo in other_repos %}
+#### For {{ repo.label | title }} Repository ({{ repo.owner }}/{{ repo.repository }})
+When working on this repository, apply the Gate Rule:
+- Check for "No {{ repo.label }} changes required"
+- Check for "{{ repo.label }} N/A" or "{{ repo.label }} changes: N/A"
+- Only proceed if changes are needed for {{ repo.label }}
+{% endfor %}
+
+General workflow:
+1. Analyze if changes are needed in any of the other repositories
+2. For each repository that needs changes:
+   - Clone the repository (see commands above)
+   - Apply the Gate Rule for that repository
+   - Base work off `main` (fallback to `master` if `main` doesn't exist)
+   - Create a branch using the Working Branch name specified for that repository
+   - Make the necessary changes
+   - Create a commit and PR
+3. If no changes are needed in a repository, skip it
+
+{% endif %}
+
 1. Analyze the Jira issue and understand the requested changes.
 2. Create a branch named "{{ branch }}" from "{{ default_branch }}".
 3. Implement the required changes following the project coding standards.
@@ -21,9 +95,20 @@ Requirements:
 5. Commit your changes with clear commit messages referencing the Jira issue key.
 6. Create a pull request targeting "{{ default_branch }}".
 7. Include a clear description of the implementation in the pull request.
-8. After creating the pull request, post a comment on the Jira issue by sending a POST request to:
+8. After ALL pull requests are created across ALL repositories,
+   post a single comment on the Jira issue by sending a POST request to:
    POST {{ comment_endpoint }}
    {
      "issue_key": "{{ issue_key }}",
-     "body": "Summary of changes implemented\\nKey files: ...\\nPR: <url>"
+     "body": "Summary of changes implemented\nKey files: ...\nPRs: <url1>, <url2>, ..."
    }
+
+{% if other_repos %}
+## Important Notes
+- Always check if other repositories also need changes
+- Analyze the Jira ticket thoroughly
+- Clone repositories and verify before skipping them
+- Create separate PRs for each repository that has changes
+- Post a single Jira comment at the very end with links to ALL PRs created
+- If a repository needs no changes, skip it
+{% endif %}

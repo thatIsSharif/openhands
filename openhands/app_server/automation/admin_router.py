@@ -27,6 +27,7 @@ class CreateProjectRepoRequest(OpenHandsModel):
     github_webhook_secret: str | None = None
     default_branch: str = 'main'
     custom_field_id: str | None = None
+    label: str | None = None
 
 
 class ProjectRepoResponse(OpenHandsModel):
@@ -39,6 +40,7 @@ class ProjectRepoResponse(OpenHandsModel):
     github_webhook_secret: str | None = None
     default_branch: str = 'main'
     custom_field_id: str | None = None
+    label: str | None = None
 
 
 class ProjectRepoListResponse(OpenHandsModel):
@@ -70,6 +72,7 @@ async def create_project_repo(
         github_webhook_secret=request.github_webhook_secret,
         default_branch=request.default_branch,
         custom_field_id=request.custom_field_id,
+        label=request.label,
     )
     return ProjectRepoResponse(
         id=record.id,
@@ -79,6 +82,7 @@ async def create_project_repo(
         github_webhook_secret=record.github_webhook_secret,
         default_branch=record.default_branch,
         custom_field_id=record.custom_field_id,
+        label=record.label,
     )
 
 
@@ -96,6 +100,7 @@ async def list_project_repos() -> ProjectRepoListResponse:
                 owner=r.owner,
                 default_branch=r.default_branch,
                 custom_field_id=r.custom_field_id,
+                label=r.label,
             )
             for r in records
         ]
@@ -118,6 +123,7 @@ async def get_project_repos_by_key(
                 owner=r.owner,
                 default_branch=r.default_branch,
                 custom_field_id=r.custom_field_id,
+                label=r.label,
             )
             for r in records
         ]
@@ -143,6 +149,7 @@ async def get_project_repo_by_id(
         owner=record.owner,
         default_branch=record.default_branch,
         custom_field_id=record.custom_field_id,
+        label=record.label,
     )
 
 

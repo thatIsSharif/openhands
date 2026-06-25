@@ -62,7 +62,7 @@ class OpenHandsClient:
 
             processors=[
                 AutomationEventCallbackProcessor(),
-            ],
+            ]
         )
 
         async with get_app_conversation_service(
