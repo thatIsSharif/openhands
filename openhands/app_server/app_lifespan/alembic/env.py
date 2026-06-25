@@ -24,6 +24,13 @@ from openhands.app_server.app_conversation.sql_app_conversation_info_service imp
 from openhands.app_server.app_conversation.sql_app_conversation_start_task_service import (  # noqa: E402
     StoredAppConversationStartTask,  # noqa: F401
 )
+from openhands.app_server.automation.models import (  # noqa: E402, F401
+    StoredExecution,  # noqa: F401
+    StoredGitHubPullRequest,  # noqa: F401
+    StoredJiraIssue,  # noqa: F401
+    StoredJiraProjectRepository,  # noqa: F401
+    StoredReviewIteration,  # noqa: F401
+)
 from openhands.app_server.config import get_global_config  # noqa: E402
 from openhands.app_server.event_callback.sql_event_callback_service import (  # noqa: E402
     StoredEventCallback,  # noqa: F401
