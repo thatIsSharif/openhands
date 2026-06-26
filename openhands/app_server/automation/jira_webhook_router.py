@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from uuid import UUID
 
 from fastapi import APIRouter, BackgroundTasks, Request
 from pydantic import BaseModel
@@ -35,6 +36,7 @@ from openhands.app_server.automation.openhands_client import (
 )
 from openhands.app_server.config import (
     get_app_conversation_info_service,
+    get_app_conversation_service,
     get_httpx_client,
     get_sandbox_service,
 )
@@ -210,6 +212,19 @@ async def _handle_comment_created(
                 f'{issue_key}'
             )
             await sandbox_service.resume_sandbox(sandbox_id)
+            # Re-fetch the sandbox after resume to get the freshly
+            # generated session_api_key. The old key was invalidated
+            # on resume, so we must use the new one for subsequent
+            # API calls to the agent server.
+            sandbox = await sandbox_service.get_sandbox(sandbox_id)
+            if sandbox:
+                session_api_key = sandbox.session_api_key
+                # Also update agent_server_url in case it changed
+                if sandbox.exposed_urls:
+                    for exposed_url in sandbox.exposed_urls:
+                        if exposed_url.name == AGENT_SERVER:
+                            agent_server_url = exposed_url.url
+                            break
         elif sandbox.status == 'MISSING' or sandbox.status == 'missing':
             logger.warning(
                 f'[Automation] Sandbox {sandbox_id} for {issue_key} '
@@ -299,19 +314,29 @@ async def _monitor_and_pause_sandbox(
     conversation_id: str,
     session_api_key: str,
     sandbox_id: str,
+    max_polls: int = 300,
 ) -> None:
     """Poll conversation status and pause the sandbox when agent finishes.
 
-    Runs as a background task after forwarding a Jira comment. Polls the
-    agent server's conversation endpoint for execution_status and pauses
-    the sandbox once a terminal state (finished/error/stuck) is reached.
-    Times out after 5 minutes.
+    Runs as a background task after forwarding a Jira comment or creating
+    a conversation for a new issue. Polls the agent server's conversation
+    endpoint for execution_status and pauses the sandbox once a terminal
+    state (finished/error/stuck) is reached.
+
+    Args:
+        agent_server_url: URL of the agent server.
+        conversation_id: ID of the conversation to monitor.
+        session_api_key: Session API key for authentication.
+        sandbox_id: ID of the sandbox to pause.
+        max_polls: Maximum number of polling iterations (1 second each).
+            Defaults to 300 (5 minutes). Use 1800 (30 minutes) for initial
+            task assignment to accommodate longer-running agents.
     """
     import httpx
 
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
-            for _ in range(300):
+            for _ in range(max_polls):
                 try:
                     resp = await client.get(
                         f'{agent_server_url}/api/conversations/{conversation_id}',
@@ -583,6 +608,51 @@ async def _process_jira_event(
                         issue_key=issue_key,
                     )
                 )
+
+                # Also start _monitor_and_pause_sandbox as a fallback
+                # that polls the agent server directly. The execution
+                # state in the DB may not get updated via the callback
+                # processor in all cases, so this ensures the sandbox
+                # gets paused when the agent finishes regardless.
+                try:
+                    async with get_app_conversation_service(
+                        request.state, request
+                    ) as app_conversation_service:
+                        app_conversation = (
+                            await app_conversation_service.get_app_conversation(
+                                UUID(conversation_id)
+                            )
+                        )
+                        if (
+                            app_conversation
+                            and app_conversation.sandbox_id
+                            and app_conversation.conversation_url
+                        ):
+                            agent_server_url = (
+                                replace_localhost_hostname_for_docker(
+                                    app_conversation.conversation_url
+                                )
+                            )
+                            asyncio.ensure_future(
+                                _monitor_and_pause_sandbox(
+                                    agent_server_url=agent_server_url,
+                                    conversation_id=conversation_id,
+                                    session_api_key=(
+                                        app_conversation.session_api_key
+                                        or ''
+                                    ),
+                                    sandbox_id=(
+                                        app_conversation.sandbox_id
+                                    ),
+                                    max_polls=1800,
+                                )
+                            )
+                except Exception:
+                    logger.exception(
+                        '[Automation] Failed to start sandbox monitor '
+                        'for %s',
+                        issue_key,
+                    )
 
     except Exception:
         import traceback
