@@ -34,6 +34,8 @@ class MockSandboxService(SandboxService):
         self.resume_sandbox_mock = AsyncMock()
         self.pause_sandbox_mock = AsyncMock()
         self.delete_sandbox_mock = AsyncMock()
+        self.snapshot_sandbox_mock = AsyncMock()
+        self.restore_from_snapshot_mock = AsyncMock()
 
     async def search_sandboxes(
         self, page_id: str | None = None, limit: int = 100
@@ -66,6 +68,14 @@ class MockSandboxService(SandboxService):
 
     async def delete_sandbox(self, sandbox_id: str) -> bool:
         return await self.delete_sandbox_mock(sandbox_id)
+
+    async def snapshot_sandbox(self, sandbox_id: str) -> str | None:
+        return await self.snapshot_sandbox_mock(sandbox_id)
+
+    async def restore_from_snapshot(
+        self, snapshot_name: str, sandbox_id: str
+    ) -> SandboxInfo | None:
+        return await self.restore_from_snapshot_mock(snapshot_name, sandbox_id)
 
 
 def create_sandbox_info(

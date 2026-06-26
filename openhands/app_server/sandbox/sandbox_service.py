@@ -4,6 +4,8 @@ import time
 from abc import ABC, abstractmethod
 
 import httpx
+from openhands.sdk.utils.models import DiscriminatedUnionMixin
+from openhands.sdk.utils.paging import page_iterator
 
 from openhands.app_server.errors import SandboxError
 from openhands.app_server.sandbox.sandbox_models import (
@@ -17,8 +19,6 @@ from openhands.app_server.services.injector import Injector
 from openhands.app_server.utils.docker_utils import (
     replace_localhost_hostname_for_docker,
 )
-from openhands.sdk.utils.models import DiscriminatedUnionMixin
-from openhands.sdk.utils.paging import page_iterator
 
 _logger = logging.getLogger(__name__)
 
@@ -198,6 +198,33 @@ class SandboxService(ABC):
         """Begin the process of deleting a sandbox (which may involve stopping it).
 
         Return False if the sandbox did not exist.
+        """
+
+    @abstractmethod
+    async def snapshot_sandbox(self, sandbox_id: str) -> str | None:
+        """Create a snapshot of the sandbox for disaster recovery.
+
+        Args:
+            sandbox_id: The sandbox ID to snapshot.
+
+        Returns:
+            Snapshot image name if successful, None if the sandbox
+            did not exist or snapshotting failed.
+        """
+
+    @abstractmethod
+    async def restore_from_snapshot(
+        self, snapshot_name: str, sandbox_id: str
+    ) -> SandboxInfo | None:
+        """Restore a sandbox from a previously taken snapshot.
+
+        Args:
+            snapshot_name: The snapshot image name to restore from.
+            sandbox_id: The sandbox ID to assign to the restored sandbox.
+
+        Returns:
+            SandboxInfo if restored successfully, None if the snapshot
+            does not exist or restoration failed.
         """
 
     async def pause_old_sandboxes(self, max_num_sandboxes: int) -> list[str]:

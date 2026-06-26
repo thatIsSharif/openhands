@@ -11,16 +11,17 @@ from uuid import UUID
 import base62
 import httpx
 from fastapi import Request
-from pydantic import Field
-from sqlalchemy import String, func, select
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import Mapped, mapped_column
-
 from openhands.agent_server.models import (
     ConversationInfo,
     EventPage,
 )
 from openhands.agent_server.utils import utc_now
+from openhands.sdk.utils.paging import page_iterator
+from pydantic import Field
+from sqlalchemy import String, func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import Mapped, mapped_column
+
 from openhands.app_server.app_conversation.app_conversation_models import (
     AppConversationInfo,
 )
@@ -48,7 +49,6 @@ from openhands.app_server.services.injector import InjectorState
 from openhands.app_server.user.specifiy_user_context import ADMIN, USER_CONTEXT_ATTR
 from openhands.app_server.user.user_context import UserContext
 from openhands.app_server.utils.sql_utils import Base, UtcDateTime
-from openhands.sdk.utils.paging import page_iterator
 
 _logger = logging.getLogger(__name__)
 polling_task: asyncio.Task | None = None
@@ -648,6 +648,22 @@ class RemoteSandboxService(SandboxService):
             results.append(result)
         return results
 
+    async def snapshot_sandbox(self, sandbox_id: str) -> str | None:
+        """Snapshot not supported for remote sandboxes."""
+        _logger.debug(
+            f'Snapshot not supported for remote sandbox {sandbox_id}'
+        )
+        return None
+
+    async def restore_from_snapshot(
+        self, snapshot_name: str, sandbox_id: str
+    ) -> SandboxInfo | None:
+        """Restore not supported for remote sandboxes."""
+        _logger.debug(
+            f'Restore from snapshot not supported for remote sandbox {sandbox_id}'
+        )
+        return None
+
 
 def _build_service_url(url: str, service_name: str, runtime_id: str) -> str:
     """Build a service URL for the given service name.
@@ -808,7 +824,7 @@ async def refresh_conversation(
 
         # Phase 2: Write - acquire DB session and save conversation info
         # (short-lived session, no network I/O held)
-        print(f"Saving conversation info for {app_conversation_info}")
+        print(f'Saving conversation info for {app_conversation_info}')
         async with (
             get_db_session(state) as _db_session,
             get_app_conversation_info_service(state) as app_conversation_info_service,

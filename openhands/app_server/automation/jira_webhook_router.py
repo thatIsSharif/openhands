@@ -7,6 +7,10 @@ Flow:
 2. Parse event type
 3. Process asynchronously via BackgroundTasks
 4. Return 202 accepted immediately
+
+Supports:
+- Issue assignment events (jira:issue_updated with assignee change)
+- Comment mention events (comment_created with @openhands)
 """
 
 from __future__ import annotations
@@ -27,6 +31,15 @@ from openhands.app_server.automation.jira_automation_service import (
 )
 from openhands.app_server.automation.openhands_client import (
     OpenHandsClient,
+)
+from openhands.app_server.config import (
+    get_app_conversation_info_service,
+    get_httpx_client,
+    get_sandbox_service,
+)
+from openhands.app_server.sandbox.sandbox_models import AGENT_SERVER
+from openhands.app_server.utils.docker_utils import (
+    replace_localhost_hostname_for_docker,
 )
 from openhands.app_server.utils.jira import add_comment
 from openhands.app_server.utils.logger import openhands_logger as logger
@@ -68,10 +81,11 @@ async def handle_jira_webhook(
         f'[Automation] Jira webhook received: {webhook_event}',
     )
 
-    # Only process issue creation events
+    # Only process issue creation/update and comment events
     if webhook_event not in (
         'jira:issue_created',
         'jira:issue_updated',
+        'comment_created',
     ):
         return JiraWebhookResponse(
             status='ignored',
@@ -101,6 +115,173 @@ async def handle_jira_webhook(
     )
 
 
+async def _handle_comment_created(
+    payload: dict,
+    request: Request,
+) -> bool:
+    """Handle a comment_created webhook event with @openhands mention.
+
+    If the comment contains @openhands, looks up an existing conversation
+    for the issue. If found, resumes the sandbox and forwards the comment
+    as a message. If not found, returns False so the caller can fall
+    through to the normal issue-creation flow.
+
+    Returns:
+        True if the comment was handled (conversation found and resumed),
+        False if no matching conversation exists.
+    """
+    issue = payload.get('issue', {})
+    issue_key = issue.get('key')
+    comment = payload.get('comment', {})
+    comment_body = (comment.get('body', '') or '').strip()
+
+    if not issue_key or not comment_body:
+        logger.info(
+            '[Automation] Comment event missing issue_key or comment body'
+        )
+        return False
+
+    # Check for @openhands mention (case-insensitive)
+    if '@openhands' not in comment_body.lower():
+        logger.info(
+            f'[Automation] Comment on {issue_key} does not mention @openhands, '
+            'skipping'
+        )
+        return False
+
+    logger.info(
+        f'[Automation] @openhands mentioned in comment on {issue_key}'
+    )
+
+    # Look up existing conversation by Jira issue key
+    async with get_app_conversation_info_service(
+        request.state, request
+    ) as info_service:
+        conversation = await info_service.get_conversation_by_jira_issue_key(
+            issue_key
+        )
+
+    if not conversation:
+        logger.info(
+            f'[Automation] No existing conversation found for {issue_key}, '
+            'falling through to new conversation creation'
+        )
+        return False
+
+    conversation_id = conversation.id
+    sandbox_id = conversation.sandbox_id
+    logger.info(
+        f'[Automation] Found conversation {conversation_id} for '
+        f'{issue_key} (sandbox: {sandbox_id})'
+    )
+
+    # Resume the sandbox if needed
+    async with get_sandbox_service(
+        request.state, request
+    ) as sandbox_service:
+        sandbox = await sandbox_service.get_sandbox(sandbox_id)
+        if sandbox is None:
+            logger.warning(
+                f'[Automation] Sandbox {sandbox_id} for conversation '
+                f'{conversation_id} not found'
+            )
+            return False
+
+        if sandbox.status == 'PAUSED' or sandbox.status == 'paused':
+            logger.info(
+                f'[Automation] Resuming sandbox {sandbox_id} for '
+                f'{issue_key}'
+            )
+            await sandbox_service.resume_sandbox(sandbox_id)
+        elif sandbox.status == 'MISSING' or sandbox.status == 'missing':
+            logger.warning(
+                f'[Automation] Sandbox {sandbox_id} for {issue_key} '
+                'is missing, cannot resume'
+            )
+            return False
+
+    # Send the comment as a message to the conversation
+    async with get_httpx_client(
+        request.state, request
+    ) as httpx_client:
+        try:
+            # Get fresh sandbox info for the agent server URL and session key
+            async with get_sandbox_service(
+                request.state, request
+            ) as sandbox_service:
+                sandbox = await sandbox_service.get_sandbox(sandbox_id)
+
+            if not sandbox or not sandbox.exposed_urls:
+                logger.warning(
+                    f'[Automation] Cannot send message for {issue_key}: '
+                    'sandbox has no exposed URLs'
+                )
+                return True
+
+            agent_server_url = None
+            for exposed_url in sandbox.exposed_urls:
+                if exposed_url.name == AGENT_SERVER:
+                    agent_server_url = exposed_url.url
+                    break
+
+            if not agent_server_url:
+                logger.warning(
+                    f'[Automation] Cannot send message for {issue_key}: '
+                    'no agent server URL found'
+                )
+                return True
+
+            agent_server_url = replace_localhost_hostname_for_docker(
+                agent_server_url
+            )
+
+            # Build the message: include both the comment body and
+            # the Jira issue reference
+            message_text = (
+                f'**[Jira comment on {issue_key}]**\n\n'
+                f'{comment_body}'
+            )
+
+            response = await httpx_client.post(
+                f'{agent_server_url}/api/conversations/'
+                f'{conversation_id}/events',
+                json={
+                    'role': 'user',
+                    'content': [
+                        {
+                            'type': 'text',
+                            'text': message_text,
+                        }
+                    ],
+                    'run': True,
+                },
+                headers=(
+                    {
+                        'X-Session-API-Key': (
+                            sandbox.session_api_key
+                        )
+                    }
+                    if sandbox.session_api_key
+                    else {}
+                ),
+                timeout=30.0,
+            )
+            response.raise_for_status()
+
+            logger.info(
+                f'[Automation] Comment from {issue_key} forwarded to '
+                f'conversation {conversation_id}'
+            )
+
+        except Exception as e:
+            logger.error(
+                f'[Automation] Failed to send comment for {issue_key} '
+                f'to conversation {conversation_id}: {e}'
+            )
+
+    return True
+
+
 async def _process_jira_event(
     payload: dict,
     request: Request,
@@ -108,6 +289,24 @@ async def _process_jira_event(
     """Process a Jira webhook event in the background."""
 
     try:
+        webhook_event = payload.get('webhookEvent', '')
+
+        # Handle comment_created events (with @openhands mention)
+        if webhook_event == 'comment_created':
+            handled = await _handle_comment_created(payload, request)
+            if handled:
+                logger.info(
+                    f'[Automation] Comment event on '
+                    f'{payload.get("issue", {}).get("key")} handled'
+                )
+                return
+            # If not handled (no existing conversation), fall through
+            # to create a new conversation via the assignment flow
+            logger.info(
+                '[Automation] Comment not handled by existing conversation, '
+                'falling through to issue assignment flow'
+            )
+
         # Read target account ID from environment (set JIRA_TARGET_ACCOUNT_ID)
         target_account_id = os.environ.get('JIRA_TARGET_ACCOUNT_ID', '')
 

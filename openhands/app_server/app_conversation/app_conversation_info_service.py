@@ -95,6 +95,19 @@ class AppConversationInfoService(ABC):
     # Mutators
 
     @abstractmethod
+    async def get_conversation_by_jira_issue_key(
+        self, jira_issue_key: str
+    ) -> AppConversationInfo | None:
+        """Look up a V1 conversation by its Jira issue key.
+
+        Args:
+            jira_issue_key: The Jira issue key to look up (e.g., "PROJ-123").
+
+        Returns:
+            AppConversationInfo if found, None otherwise.
+        """
+
+    @abstractmethod
     async def save_app_conversation_info(
         self, info: AppConversationInfo
     ) -> AppConversationInfo:

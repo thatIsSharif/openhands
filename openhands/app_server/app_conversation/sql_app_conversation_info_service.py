@@ -116,6 +116,11 @@ class StoredConversationMetadata(Base):
         create_json_type_decorator(dict[str, str]), nullable=True
     )
 
+    # Jira issue key for cross-referencing conversations with Jira issues
+    jira_issue_key: Mapped[str | None] = mapped_column(
+        String, nullable=True, index=True
+    )
+
 
 @dataclass
 class SQLAppConversationInfoService(AppConversationInfoService):
@@ -344,6 +349,23 @@ class SQLAppConversationInfoService(AppConversationInfoService):
 
         return results
 
+    async def get_conversation_by_jira_issue_key(
+        self, jira_issue_key: str
+    ) -> AppConversationInfo | None:
+        """Look up a V1 conversation by its Jira issue key."""
+        query = await self._secure_select()
+        query = query.where(
+            StoredConversationMetadata.jira_issue_key == jira_issue_key
+        )
+        result_set = await self.db_session.execute(query)
+        result = result_set.scalar_one_or_none()
+        if result:
+            sub_conversation_ids = await self.get_sub_conversation_ids(
+                UUID(result.conversation_id)
+            )
+            return self._to_info(result, sub_conversation_ids=sub_conversation_ids)
+        return None
+
     async def save_app_conversation_info(
         self, info: AppConversationInfo
     ) -> AppConversationInfo:
@@ -381,6 +403,7 @@ class SQLAppConversationInfoService(AppConversationInfoService):
             ),
             public=info.public,
             tags=info.tags if info.tags else None,
+            jira_issue_key=info.jira_issue_key,
         )
 
         await self.db_session.merge(stored)
@@ -570,6 +593,7 @@ class SQLAppConversationInfoService(AppConversationInfoService):
             sub_conversation_ids=sub_conversation_ids or [],
             public=stored.public,
             tags=stored.tags or {},
+            jira_issue_key=stored.jira_issue_key,
             created_at=created_at,
             updated_at=updated_at,
         )
