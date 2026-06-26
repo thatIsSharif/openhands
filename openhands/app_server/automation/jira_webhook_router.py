@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-from uuid import UUID
 
 from fastapi import APIRouter, BackgroundTasks, Request
 from pydantic import BaseModel
@@ -36,16 +35,23 @@ from openhands.app_server.automation.openhands_client import (
 )
 from openhands.app_server.config import (
     get_app_conversation_info_service,
-    get_app_conversation_service,
     get_httpx_client,
     get_sandbox_service,
 )
-from openhands.app_server.sandbox.sandbox_models import AGENT_SERVER
+from openhands.app_server.sandbox.sandbox_models import (
+    AGENT_SERVER,
+    SandboxStatus,
+)
 from openhands.app_server.utils.docker_utils import (
     replace_localhost_hostname_for_docker,
 )
 from openhands.app_server.utils.jira import add_comment
 from openhands.app_server.utils.logger import openhands_logger as logger
+from openhands.app_server.user.specifiy_user_context import (
+    ADMIN,
+    USER_CONTEXT_ATTR,
+)
+from openhands.app_server.services.injector import InjectorState
 
 
 class JiraCommentRequest(BaseModel):
@@ -178,10 +184,6 @@ async def _handle_comment_created(
         f'{issue_key} (sandbox: {sandbox_id})'
     )
 
-    # Resume the sandbox if needed and capture agent_server_url
-    # from the sandbox info *before* resuming. Paused containers now
-    # return exposed_urls (port mappings are available even when paused),
-    # so we can construct the URL without needing to re-fetch after resume.
     agent_server_url = None
     session_api_key = None
 
@@ -196,14 +198,12 @@ async def _handle_comment_created(
             )
             return False
 
-        # Capture agent server URL from sandbox exposed URLs
         if sandbox.exposed_urls:
             for exposed_url in sandbox.exposed_urls:
                 if exposed_url.name == AGENT_SERVER:
                     agent_server_url = exposed_url.url
                     break
 
-        # Capture session_api_key from paused/running container
         session_api_key = sandbox.session_api_key
 
         if sandbox.status == 'PAUSED' or sandbox.status == 'paused':
@@ -212,19 +212,40 @@ async def _handle_comment_created(
                 f'{issue_key}'
             )
             await sandbox_service.resume_sandbox(sandbox_id)
-            # Re-fetch the sandbox after resume to get the freshly
-            # generated session_api_key. The old key was invalidated
-            # on resume, so we must use the new one for subsequent
-            # API calls to the agent server.
-            sandbox = await sandbox_service.get_sandbox(sandbox_id)
-            if sandbox:
-                session_api_key = sandbox.session_api_key
-                # Also update agent_server_url in case it changed
-                if sandbox.exposed_urls:
+
+            # Retry re-fetch up to 10 times — after resume there is a
+            # brief window where the runtime has not yet transitioned to
+            # RUNNING and thus has no exposed_urls.  Once RUNNING,
+            # exposed_urls (including the agent-server URL) and the
+            # freshly generated session_api_key become available.
+            for retry in range(10):
+                sandbox = await sandbox_service.get_sandbox(sandbox_id)
+                if sandbox is None:
+                    break
+                if (
+                    sandbox.status == SandboxStatus.RUNNING
+                    and sandbox.exposed_urls
+                    and sandbox.session_api_key
+                ):
+                    session_api_key = sandbox.session_api_key
                     for exposed_url in sandbox.exposed_urls:
                         if exposed_url.name == AGENT_SERVER:
                             agent_server_url = exposed_url.url
                             break
+                    logger.info(
+                        f'[Automation] Sandbox {sandbox_id} RUNNING after '
+                        f'resume (retry={retry})'
+                    )
+                    break
+                await asyncio.sleep(1)
+            else:
+                logger.warning(
+                    f'[Automation] Sandbox {sandbox_id} did not become '
+                    'RUNNING within 10s after resume, trying with '
+                    f'current data (key={session_api_key is not None}, '
+                    f'url={agent_server_url})'
+                )
+
         elif sandbox.status == 'MISSING' or sandbox.status == 'missing':
             logger.warning(
                 f'[Automation] Sandbox {sandbox_id} for {issue_key} '
@@ -293,15 +314,13 @@ async def _handle_comment_created(
                 _monitor_and_pause_sandbox(
                     agent_server_url=agent_server_url,
                     conversation_id=str(conversation_id),
-                    session_api_key=(
-                        sandbox.session_api_key if sandbox.session_api_key else ''
-                    ),
+                    session_api_key=session_api_key or '',
                     sandbox_id=sandbox_id,
                 )
             )
 
         except Exception as e:
-            logger.error(
+            logger.exception(
                 f'[Automation] Failed to send comment for {issue_key} '
                 f'to conversation {conversation_id}: {e}'
             )
@@ -400,15 +419,6 @@ async def _monitor_execution_and_pause(
     """
     from openhands.app_server.automation.execution_models import ExecutionState
     from openhands.app_server.automation.execution_store import ExecutionStore
-    from openhands.app_server.config import (
-        get_app_conversation_service,
-        get_sandbox_service,
-    )
-    from openhands.app_server.services.injector import InjectorState
-    from openhands.app_server.user.specifiy_user_context import (
-        ADMIN,
-        USER_CONTEXT_ATTR,
-    )
 
     store = ExecutionStore()
     try:
@@ -437,39 +447,54 @@ async def _monitor_execution_and_pause(
                     )
                     return
 
-                # Look up the app conversation to get sandbox_id
+                logger.info(
+                    '[Automation] Execution %s reached terminal state %s '
+                    'for %s, pausing sandbox',
+                    execution_id,
+                    record.state,
+                    issue_key,
+                )
+
                 injector_state = InjectorState()
                 setattr(injector_state, USER_CONTEXT_ATTR, ADMIN)
-                async with (
-                    get_app_conversation_service(injector_state)
-                    as app_conversation_service,
-                    get_sandbox_service(injector_state) as sandbox_service,
-                ):
-                    app_conversation = (
-                        await app_conversation_service.get_app_conversation(
-                            conversation_id
-                        )
+                async with get_sandbox_service(
+                    injector_state
+                ) as sandbox_service:
+                    # Look up the app conversation via the info service
+                    # to find the sandbox_id.
+                    from openhands.app_server.config import (
+                        get_app_conversation_info_service,
                     )
-                    if not app_conversation:
-                        logger.warning(
-                            '[Automation] AppConversation %s not found '
-                            'for execution %s (%s)',
-                            conversation_id,
-                            execution_id,
-                            issue_key,
-                        )
-                        return
 
-                    sandbox_id = app_conversation.sandbox_id
-                    if sandbox_id:
-                        await sandbox_service.pause_sandbox(sandbox_id)
-                        logger.info(
-                            '[Automation] Paused sandbox %s after '
-                            'execution %s completed (%s)',
-                            sandbox_id,
-                            execution_id,
-                            issue_key,
+                    async with get_app_conversation_info_service(
+                        injector_state
+                    ) as info_service:
+                        app_conversation_info = (
+                            await info_service.get_app_conversation_info(
+                                conversation_id
+                            )
                         )
+                        sandbox_id = (
+                            app_conversation_info.sandbox_id
+                            if app_conversation_info
+                            else None
+                        )
+                        if sandbox_id:
+                            await sandbox_service.pause_sandbox(sandbox_id)
+                            logger.info(
+                                '[Automation] Paused sandbox %s after '
+                                'execution %s completed (%s)',
+                                sandbox_id,
+                                execution_id,
+                                issue_key,
+                            )
+                        else:
+                            logger.warning(
+                                '[Automation] No sandbox_id found for '
+                                'conversation %s (%s)',
+                                conversation_id,
+                                issue_key,
+                            )
                 return
 
             await asyncio.sleep(1)
@@ -615,38 +640,50 @@ async def _process_jira_event(
                 # processor in all cases, so this ensures the sandbox
                 # gets paused when the agent finishes regardless.
                 try:
-                    async with get_app_conversation_service(
+                    async with get_app_conversation_info_service(
                         request.state, request
-                    ) as app_conversation_service:
-                        app_conversation = (
-                            await app_conversation_service.get_app_conversation(
-                                UUID(conversation_id)
+                    ) as info_service:
+                        app_conversation_info = (
+                            await info_service.get_app_conversation_info(
+                                conversation_id
                             )
                         )
-                        if (
-                            app_conversation
-                            and app_conversation.sandbox_id
-                            and app_conversation.conversation_url
-                        ):
-                            agent_server_url = (
-                                replace_localhost_hostname_for_docker(
-                                    app_conversation.conversation_url
+                        if app_conversation_info and app_conversation_info.sandbox_id:
+                            sandbox_id = app_conversation_info.sandbox_id
+                            async with get_sandbox_service(
+                                request.state, request
+                            ) as sandbox_service:
+                                sandbox = (
+                                    await sandbox_service.get_sandbox(
+                                        sandbox_id
+                                    )
                                 )
-                            )
-                            asyncio.ensure_future(
-                                _monitor_and_pause_sandbox(
-                                    agent_server_url=agent_server_url,
-                                    conversation_id=conversation_id,
-                                    session_api_key=(
-                                        app_conversation.session_api_key
-                                        or ''
-                                    ),
-                                    sandbox_id=(
-                                        app_conversation.sandbox_id
-                                    ),
-                                    max_polls=1800,
-                                )
-                            )
+                                if (
+                                    sandbox
+                                    and sandbox.exposed_urls
+                                    and sandbox.session_api_key
+                                ):
+                                    for exposed_url in sandbox.exposed_urls:
+                                        if exposed_url.name == AGENT_SERVER:
+                                            base_url = exposed_url.url
+                                            break
+                                    else:
+                                        base_url = None
+                                    if base_url:
+                                        agent_server_url = (
+                                            replace_localhost_hostname_for_docker(
+                                                base_url
+                                            )
+                                        )
+                                        asyncio.ensure_future(
+                                            _monitor_and_pause_sandbox(
+                                                agent_server_url=agent_server_url,
+                                                conversation_id=conversation_id,
+                                                session_api_key=sandbox.session_api_key,
+                                                sandbox_id=sandbox_id,
+                                                max_polls=1800,
+                                            )
+                                        )
                 except Exception:
                     logger.exception(
                         '[Automation] Failed to start sandbox monitor '
