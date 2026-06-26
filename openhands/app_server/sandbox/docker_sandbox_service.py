@@ -151,11 +151,14 @@ class DockerSandboxService(SandboxService):
         except (ValueError, AttributeError):
             created_at = utc_now()
 
-        # Get URL and session key for running containers
+        # Get URL and session key for running/paused containers.
+        # Port mappings and env vars are still available on paused containers,
+        # so we populate exposed_urls for both states to allow callers to
+        # construct the agent server URL even before resuming.
         exposed_urls = None
         session_api_key = None
 
-        if status == SandboxStatus.RUNNING:
+        if status in (SandboxStatus.RUNNING, SandboxStatus.PAUSED):
             # Get session API key first
             env = self._get_container_env_vars(container)
             session_api_key = env.get(SESSION_API_KEY_VARIABLE)
