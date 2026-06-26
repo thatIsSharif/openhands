@@ -13,7 +13,6 @@ from uuid import UUID
 from openhands.app_server.event_callback.event_callback_models import (
     EventCallback,
     EventCallbackProcessor,
-    EventCallbackStatus,
     EventKind,
 )
 from openhands.app_server.event_callback.event_callback_result_models import (
@@ -95,11 +94,12 @@ class AutomationEventCallbackProcessor(EventCallbackProcessor):
             ),
         )
 
-        # Pause the sandbox so it can be resumed on the next Jira comment
+        # Pause the sandbox so it can be resumed on the next Jira comment.
+        # We intentionally do NOT set callback.status to COMPLETED here —
+        # the callback stays ACTIVE so it fires again when a follow-up
+        # Jira comment triggers a new run (execution_status transitions
+        # FINISHED → RUNNING → FINISHED).
         await self._pause_sandbox(conversation_id)
-
-        # Disable this callback after terminal event
-        callback.status = EventCallbackStatus.COMPLETED
 
         return EventCallbackResult(
             status=EventCallbackResultStatus.SUCCESS,

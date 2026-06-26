@@ -15,6 +15,7 @@ Supports:
 
 from __future__ import annotations
 
+import asyncio
 import os
 
 from fastapi import APIRouter, BackgroundTasks, Request
@@ -273,6 +274,21 @@ async def _handle_comment_created(
                 f'conversation {conversation_id}'
             )
 
+            # Spawn a background task to wait for the agent to finish
+            # processing and then pause the sandbox. This ensures the
+            # sandbox is paused even if the event callback processor
+            # path has any issues delivering the terminal event.
+            asyncio.ensure_future(
+                _monitor_and_pause_sandbox(
+                    agent_server_url=agent_server_url,
+                    conversation_id=str(conversation_id),
+                    session_api_key=(
+                        sandbox.session_api_key if sandbox.session_api_key else ''
+                    ),
+                    sandbox_id=sandbox_id,
+                )
+            )
+
         except Exception as e:
             logger.error(
                 f'[Automation] Failed to send comment for {issue_key} '
@@ -280,6 +296,74 @@ async def _handle_comment_created(
             )
 
     return True
+
+
+async def _monitor_and_pause_sandbox(
+    agent_server_url: str,
+    conversation_id: str,
+    session_api_key: str,
+    sandbox_id: str,
+) -> None:
+    """Poll conversation status and pause the sandbox when agent finishes.
+
+    Runs as a background task after forwarding a Jira comment. Polls the
+    agent server's conversation endpoint for execution_status and pauses
+    the sandbox once a terminal state (finished/error/stuck) is reached.
+    Times out after 5 minutes.
+    """
+    import httpx
+
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            for _ in range(300):
+                try:
+                    resp = await client.get(
+                        f'{agent_server_url}/api/conversations/{conversation_id}',
+                        headers={
+                            'X-Session-API-Key': session_api_key,
+                        },
+                    )
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        exec_status = data.get('execution_status', '')
+                        if exec_status in ('finished', 'error', 'stuck'):
+                            await _pause_sandbox_by_id(sandbox_id)
+                            logger.info(
+                                '[Automation] Paused sandbox %s after '
+                                'agent finished (status=%s)',
+                                sandbox_id,
+                                exec_status,
+                            )
+                            return
+                except Exception:
+                    pass
+                await asyncio.sleep(1)
+
+            logger.warning(
+                '[Automation] Timed out waiting for conversation %s '
+                'to finish, sandbox %s may still be running',
+                conversation_id,
+                sandbox_id,
+            )
+    except Exception:
+        logger.exception(
+            '[Automation] Error monitoring sandbox %s', sandbox_id
+        )
+
+
+async def _pause_sandbox_by_id(sandbox_id: str) -> None:
+    """Pause a sandbox by ID, using the injector pattern."""
+    from openhands.app_server.config import get_sandbox_service
+    from openhands.app_server.services.injector import InjectorState
+    from openhands.app_server.user.specifiy_user_context import (
+        ADMIN,
+        USER_CONTEXT_ATTR,
+    )
+
+    state = InjectorState()
+    setattr(state, USER_CONTEXT_ATTR, ADMIN)
+    async with get_sandbox_service(state) as sandbox_service:
+        await sandbox_service.pause_sandbox(sandbox_id)
 
 
 async def _process_jira_event(
