@@ -407,6 +407,7 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
                 trigger=request.trigger,
                 pr_number=request.pr_number,
                 parent_conversation_id=request.parent_conversation_id,
+                jira_issue_key=request.jira_issue_key,
             )
 
             await self.app_conversation_info_service.save_app_conversation_info(

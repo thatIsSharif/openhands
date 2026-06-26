@@ -7,10 +7,15 @@ Flow:
 2. Parse event type
 3. Process asynchronously via BackgroundTasks
 4. Return 202 accepted immediately
+
+Supports:
+- Issue assignment events (jira:issue_updated with assignee change)
+- Comment mention events (comment_created with @openhands)
 """
 
 from __future__ import annotations
 
+import asyncio
 import os
 
 from fastapi import APIRouter, BackgroundTasks, Request
@@ -28,8 +33,25 @@ from openhands.app_server.automation.jira_automation_service import (
 from openhands.app_server.automation.openhands_client import (
     OpenHandsClient,
 )
+from openhands.app_server.config import (
+    get_app_conversation_info_service,
+    get_httpx_client,
+    get_sandbox_service,
+)
+from openhands.app_server.sandbox.sandbox_models import (
+    AGENT_SERVER,
+    SandboxStatus,
+)
+from openhands.app_server.utils.docker_utils import (
+    replace_localhost_hostname_for_docker,
+)
 from openhands.app_server.utils.jira import add_comment
 from openhands.app_server.utils.logger import openhands_logger as logger
+from openhands.app_server.user.specifiy_user_context import (
+    ADMIN,
+    USER_CONTEXT_ATTR,
+)
+from openhands.app_server.services.injector import InjectorState
 
 
 class JiraCommentRequest(BaseModel):
@@ -68,10 +90,11 @@ async def handle_jira_webhook(
         f'[Automation] Jira webhook received: {webhook_event}',
     )
 
-    # Only process issue creation events
+    # Only process issue creation/update and comment events
     if webhook_event not in (
         'jira:issue_created',
         'jira:issue_updated',
+        'comment_created',
     ):
         return JiraWebhookResponse(
             status='ignored',
@@ -101,6 +124,394 @@ async def handle_jira_webhook(
     )
 
 
+async def _handle_comment_created(
+    payload: dict,
+    request: Request,
+) -> bool:
+    """Handle a comment_created webhook event with @openhands mention.
+
+    If the comment contains @openhands, looks up an existing conversation
+    for the issue. If found, resumes the sandbox and forwards the comment
+    as a message. If not found, returns False so the caller can fall
+    through to the normal issue-creation flow.
+
+    Returns:
+        True if the comment was handled (conversation found and resumed),
+        False if no matching conversation exists.
+    """
+    issue = payload.get('issue', {})
+    issue_key = issue.get('key')
+    comment = payload.get('comment', {})
+    comment_body = (comment.get('body', '') or '').strip()
+
+    if not issue_key or not comment_body:
+        logger.info(
+            '[Automation] Comment event missing issue_key or comment body'
+        )
+        return False
+
+    # Check for @openhands mention (case-insensitive)
+    if '@openhands' not in comment_body.lower():
+        logger.info(
+            f'[Automation] Comment on {issue_key} does not mention @openhands, '
+            'skipping'
+        )
+        return False
+
+    logger.info(
+        f'[Automation] @openhands mentioned in comment on {issue_key}'
+    )
+
+    # Look up existing conversation by Jira issue key
+    async with get_app_conversation_info_service(
+        request.state, request
+    ) as info_service:
+        conversation = await info_service.get_conversation_by_jira_issue_key(
+            issue_key
+        )
+
+    if not conversation:
+        logger.info(
+            f'[Automation] No existing conversation found for {issue_key}, '
+            'falling through to new conversation creation'
+        )
+        return False
+
+    conversation_id = conversation.id
+    sandbox_id = conversation.sandbox_id
+    logger.info(
+        f'[Automation] Found conversation {conversation_id} for '
+        f'{issue_key} (sandbox: {sandbox_id})'
+    )
+
+    agent_server_url = None
+    session_api_key = None
+
+    async with get_sandbox_service(
+        request.state, request
+    ) as sandbox_service:
+        sandbox = await sandbox_service.get_sandbox(sandbox_id)
+        if sandbox is None:
+            logger.warning(
+                f'[Automation] Sandbox {sandbox_id} for conversation '
+                f'{conversation_id} not found'
+            )
+            return False
+
+        if sandbox.exposed_urls:
+            for exposed_url in sandbox.exposed_urls:
+                if exposed_url.name == AGENT_SERVER:
+                    agent_server_url = exposed_url.url
+                    break
+
+        session_api_key = sandbox.session_api_key
+
+        if sandbox.status == 'PAUSED' or sandbox.status == 'paused':
+            logger.info(
+                f'[Automation] Resuming sandbox {sandbox_id} for '
+                f'{issue_key}'
+            )
+            await sandbox_service.resume_sandbox(sandbox_id)
+
+            # Retry re-fetch up to 10 times — after resume there is a
+            # brief window where the runtime has not yet transitioned to
+            # RUNNING and thus has no exposed_urls.  Once RUNNING,
+            # exposed_urls (including the agent-server URL) and the
+            # freshly generated session_api_key become available.
+            for retry in range(10):
+                sandbox = await sandbox_service.get_sandbox(sandbox_id)
+                if sandbox is None:
+                    break
+                if (
+                    sandbox.status == SandboxStatus.RUNNING
+                    and sandbox.exposed_urls
+                    and sandbox.session_api_key
+                ):
+                    session_api_key = sandbox.session_api_key
+                    for exposed_url in sandbox.exposed_urls:
+                        if exposed_url.name == AGENT_SERVER:
+                            agent_server_url = exposed_url.url
+                            break
+                    logger.info(
+                        f'[Automation] Sandbox {sandbox_id} RUNNING after '
+                        f'resume (retry={retry})'
+                    )
+                    break
+                await asyncio.sleep(1)
+            else:
+                logger.warning(
+                    f'[Automation] Sandbox {sandbox_id} did not become '
+                    'RUNNING within 10s after resume, trying with '
+                    f'current data (key={session_api_key is not None}, '
+                    f'url={agent_server_url})'
+                )
+
+        elif sandbox.status == 'MISSING' or sandbox.status == 'missing':
+            logger.warning(
+                f'[Automation] Sandbox {sandbox_id} for {issue_key} '
+                'is missing, cannot resume'
+            )
+            return False
+
+    if not agent_server_url:
+        logger.warning(
+            f'[Automation] Cannot send message for {issue_key}: '
+            'no agent server URL found'
+        )
+        return True
+
+    agent_server_url = replace_localhost_hostname_for_docker(
+        agent_server_url
+    )
+
+    # Send the comment as a message to the conversation
+    async with get_httpx_client(
+        request.state, request
+    ) as httpx_client:
+        try:
+
+            # Build the message: include both the comment body and
+            # the Jira issue reference
+            message_text = (
+                f'**[Jira comment on {issue_key}]**\n\n'
+                f'{comment_body}'
+            )
+
+            response = await httpx_client.post(
+                f'{agent_server_url}/api/conversations/'
+                f'{conversation_id}/events',
+                json={
+                    'role': 'user',
+                    'content': [
+                        {
+                            'type': 'text',
+                            'text': message_text,
+                        }
+                    ],
+                    'run': True,
+                },
+                headers=(
+                    {
+                        'X-Session-API-Key': session_api_key,
+                    }
+                    if session_api_key
+                    else {}
+                ),
+                timeout=30.0,
+            )
+            response.raise_for_status()
+
+            logger.info(
+                f'[Automation] Comment from {issue_key} forwarded to '
+                f'conversation {conversation_id}'
+            )
+
+            # Spawn a background task to wait for the agent to finish
+            # processing and then pause the sandbox. This ensures the
+            # sandbox is paused even if the event callback processor
+            # path has any issues delivering the terminal event.
+            asyncio.ensure_future(
+                _monitor_and_pause_sandbox(
+                    agent_server_url=agent_server_url,
+                    conversation_id=str(conversation_id),
+                    session_api_key=session_api_key or '',
+                    sandbox_id=sandbox_id,
+                )
+            )
+
+        except Exception as e:
+            logger.exception(
+                f'[Automation] Failed to send comment for {issue_key} '
+                f'to conversation {conversation_id}: {e}'
+            )
+
+    return True
+
+
+async def _monitor_and_pause_sandbox(
+    agent_server_url: str,
+    conversation_id: str,
+    session_api_key: str,
+    sandbox_id: str,
+    max_polls: int = 300,
+) -> None:
+    """Poll conversation status and pause the sandbox when agent finishes.
+
+    Runs as a background task after forwarding a Jira comment or creating
+    a conversation for a new issue. Polls the agent server's conversation
+    endpoint for execution_status and pauses the sandbox once a terminal
+    state (finished/error/stuck) is reached.
+
+    Args:
+        agent_server_url: URL of the agent server.
+        conversation_id: ID of the conversation to monitor.
+        session_api_key: Session API key for authentication.
+        sandbox_id: ID of the sandbox to pause.
+        max_polls: Maximum number of polling iterations (1 second each).
+            Defaults to 300 (5 minutes). Use 1800 (30 minutes) for initial
+            task assignment to accommodate longer-running agents.
+    """
+    import httpx
+
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            for _ in range(max_polls):
+                try:
+                    resp = await client.get(
+                        f'{agent_server_url}/api/conversations/{conversation_id}',
+                        headers={
+                            'X-Session-API-Key': session_api_key,
+                        },
+                    )
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        exec_status = data.get('execution_status', '')
+                        if exec_status in ('finished', 'error', 'stuck'):
+                            await _pause_sandbox_by_id(sandbox_id)
+                            logger.info(
+                                '[Automation] Paused sandbox %s after '
+                                'agent finished (status=%s)',
+                                sandbox_id,
+                                exec_status,
+                            )
+                            return
+                except Exception:
+                    pass
+                await asyncio.sleep(1)
+
+            logger.warning(
+                '[Automation] Timed out waiting for conversation %s '
+                'to finish, sandbox %s may still be running',
+                conversation_id,
+                sandbox_id,
+            )
+    except Exception:
+        logger.exception(
+            '[Automation] Error monitoring sandbox %s', sandbox_id
+        )
+
+
+async def _pause_sandbox_by_id(sandbox_id: str) -> None:
+    """Pause a sandbox by ID, using the injector pattern."""
+    from openhands.app_server.config import get_sandbox_service
+    from openhands.app_server.services.injector import InjectorState
+    from openhands.app_server.user.specifiy_user_context import (
+        ADMIN,
+        USER_CONTEXT_ATTR,
+    )
+
+    state = InjectorState()
+    setattr(state, USER_CONTEXT_ATTR, ADMIN)
+    async with get_sandbox_service(state) as sandbox_service:
+        await sandbox_service.pause_sandbox(sandbox_id)
+
+
+async def _monitor_execution_and_pause(
+    execution_id: str,
+    issue_key: str,
+) -> None:
+    """Poll execution state and pause sandbox when execution completes.
+
+    Runs as a background task after creating a conversation for a Jira
+    assignment event. Polls the execution store for a terminal state
+    (COMPLETED/FAILED/CANCELLED), then pauses the associated sandbox.
+    Times out after 30 minutes.
+    """
+    from openhands.app_server.automation.execution_models import ExecutionState
+    from openhands.app_server.automation.execution_store import ExecutionStore
+
+    store = ExecutionStore()
+    try:
+        for _ in range(1800):
+            record = await store.get_execution(execution_id)
+            if not record:
+                logger.info(
+                    '[Automation] Execution %s for %s no longer exists',
+                    execution_id,
+                    issue_key,
+                )
+                return
+
+            if record.state in (
+                ExecutionState.COMPLETED,
+                ExecutionState.FAILED,
+                ExecutionState.CANCELLED,
+            ):
+                conversation_id = record.conversation_id
+                if not conversation_id:
+                    logger.info(
+                        '[Automation] No conversation_id for '
+                        'execution %s (%s)',
+                        execution_id,
+                        issue_key,
+                    )
+                    return
+
+                logger.info(
+                    '[Automation] Execution %s reached terminal state %s '
+                    'for %s, pausing sandbox',
+                    execution_id,
+                    record.state,
+                    issue_key,
+                )
+
+                injector_state = InjectorState()
+                setattr(injector_state, USER_CONTEXT_ATTR, ADMIN)
+                async with get_sandbox_service(
+                    injector_state
+                ) as sandbox_service:
+                    # Look up the app conversation via the info service
+                    # to find the sandbox_id.
+                    from openhands.app_server.config import (
+                        get_app_conversation_info_service,
+                    )
+
+                    async with get_app_conversation_info_service(
+                        injector_state
+                    ) as info_service:
+                        app_conversation_info = (
+                            await info_service.get_app_conversation_info(
+                                conversation_id
+                            )
+                        )
+                        sandbox_id = (
+                            app_conversation_info.sandbox_id
+                            if app_conversation_info
+                            else None
+                        )
+                        if sandbox_id:
+                            await sandbox_service.pause_sandbox(sandbox_id)
+                            logger.info(
+                                '[Automation] Paused sandbox %s after '
+                                'execution %s completed (%s)',
+                                sandbox_id,
+                                execution_id,
+                                issue_key,
+                            )
+                        else:
+                            logger.warning(
+                                '[Automation] No sandbox_id found for '
+                                'conversation %s (%s)',
+                                conversation_id,
+                                issue_key,
+                            )
+                return
+
+            await asyncio.sleep(1)
+
+        logger.warning(
+            '[Automation] Timed out monitoring execution %s for %s',
+            execution_id,
+            issue_key,
+        )
+    except Exception:
+        logger.exception(
+            '[Automation] Error monitoring execution %s for %s',
+            execution_id,
+            issue_key,
+        )
+
+
 async def _process_jira_event(
     payload: dict,
     request: Request,
@@ -108,6 +519,24 @@ async def _process_jira_event(
     """Process a Jira webhook event in the background."""
 
     try:
+        webhook_event = payload.get('webhookEvent', '')
+
+        # Handle comment_created events (with @openhands mention)
+        if webhook_event == 'comment_created':
+            handled = await _handle_comment_created(payload, request)
+            if handled:
+                logger.info(
+                    f'[Automation] Comment event on '
+                    f'{payload.get("issue", {}).get("key")} handled'
+                )
+                return
+            # If not handled (no existing conversation), fall through
+            # to create a new conversation via the assignment flow
+            logger.info(
+                '[Automation] Comment not handled by existing conversation, '
+                'falling through to issue assignment flow'
+            )
+
         # Read target account ID from environment (set JIRA_TARGET_ACCOUNT_ID)
         target_account_id = os.environ.get('JIRA_TARGET_ACCOUNT_ID', '')
 
@@ -148,6 +577,10 @@ async def _process_jira_event(
             '[Automation] Issue assigned to target user, starting automation'
         )
 
+        # Extract issue_key for background monitoring
+        issue = payload.get('issue', {})
+        issue_key = issue.get('key', 'unknown')
+
         # Build services using OSS DI
         store = ExecutionStore()
         execution_service = ExecutionService(store=store)
@@ -173,11 +606,90 @@ async def _process_jira_event(
                 f'[Automation] Jira event processed: multi '
                 f'({len(executions)} executions: {ids})',
             )
+
+            # Start background monitor for each execution
+            for execution in executions:
+                execution_id = execution.get('execution_id')
+                if execution_id:
+                    asyncio.ensure_future(
+                        _monitor_execution_and_pause(
+                            execution_id=execution_id,
+                            issue_key=issue_key,
+                        )
+                    )
         else:
             logger.info(
                 f'[Automation] Jira event processed: {result.get("status")} '
                 f'(execution: {result.get("execution_id", "N/A")})',
             )
+
+            # Start background monitor if a conversation was created
+            conversation_id = result.get('conversation_id')
+            execution_id = result.get('execution_id')
+            if conversation_id and execution_id:
+                asyncio.ensure_future(
+                    _monitor_execution_and_pause(
+                        execution_id=execution_id,
+                        issue_key=issue_key,
+                    )
+                )
+
+                # Also start _monitor_and_pause_sandbox as a fallback
+                # that polls the agent server directly. The execution
+                # state in the DB may not get updated via the callback
+                # processor in all cases, so this ensures the sandbox
+                # gets paused when the agent finishes regardless.
+                try:
+                    async with get_app_conversation_info_service(
+                        request.state, request
+                    ) as info_service:
+                        app_conversation_info = (
+                            await info_service.get_app_conversation_info(
+                                conversation_id
+                            )
+                        )
+                        if app_conversation_info and app_conversation_info.sandbox_id:
+                            sandbox_id = app_conversation_info.sandbox_id
+                            async with get_sandbox_service(
+                                request.state, request
+                            ) as sandbox_service:
+                                sandbox = (
+                                    await sandbox_service.get_sandbox(
+                                        sandbox_id
+                                    )
+                                )
+                                if (
+                                    sandbox
+                                    and sandbox.exposed_urls
+                                    and sandbox.session_api_key
+                                ):
+                                    for exposed_url in sandbox.exposed_urls:
+                                        if exposed_url.name == AGENT_SERVER:
+                                            base_url = exposed_url.url
+                                            break
+                                    else:
+                                        base_url = None
+                                    if base_url:
+                                        agent_server_url = (
+                                            replace_localhost_hostname_for_docker(
+                                                base_url
+                                            )
+                                        )
+                                        asyncio.ensure_future(
+                                            _monitor_and_pause_sandbox(
+                                                agent_server_url=agent_server_url,
+                                                conversation_id=conversation_id,
+                                                session_api_key=sandbox.session_api_key,
+                                                sandbox_id=sandbox_id,
+                                                max_polls=1800,
+                                            )
+                                        )
+                except Exception:
+                    logger.exception(
+                        '[Automation] Failed to start sandbox monitor '
+                        'for %s',
+                        issue_key,
+                    )
 
     except Exception:
         import traceback

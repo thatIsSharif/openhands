@@ -1,9 +1,8 @@
 from datetime import datetime
 from enum import Enum
 
-from pydantic import BaseModel, Field
-
 from openhands.agent_server.utils import utc_now
+from pydantic import BaseModel, Field
 
 
 class SandboxStatus(Enum):
@@ -69,6 +68,13 @@ class SandboxInfo(BaseModel):
         ),
     )
     created_at: datetime = Field(default_factory=utc_now)
+    snapshot_name: str | None = Field(
+        default=None,
+        description=(
+            'Name of the Docker snapshot image created from this sandbox, '
+            'used for disaster recovery.'
+        ),
+    )
 
 
 class SandboxPage(BaseModel):

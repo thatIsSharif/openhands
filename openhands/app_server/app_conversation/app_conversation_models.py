@@ -130,6 +130,9 @@ class AppConversationInfo(BaseModel):
     # Tags for conversation metadata (e.g., automation context, skills used)
     tags: dict[str, str] = Field(default_factory=dict)
 
+    # Jira issue key for cross-referencing conversations with Jira issues
+    jira_issue_key: str | None = None
+
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 
@@ -199,6 +202,9 @@ class AppConversationStartRequest(OpenHandsModel):
     pr_number: list[int] = Field(default_factory=list)
     parent_conversation_id: OpenHandsUUID | None = None
     agent_type: AgentType = Field(default=AgentType.DEFAULT)
+
+    # Jira issue key for cross-referencing conversations with Jira issues
+    jira_issue_key: str | None = None
 
     public: bool | None = None
 

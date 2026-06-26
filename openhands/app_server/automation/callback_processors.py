@@ -92,7 +92,9 @@ class AutomationEventCallbackProcessor(EventCallbackProcessor):
             ),
         )
 
-        # Disable this callback after terminal event
+        # Disable this callback after terminal event — execution state
+        # updates are one-time. Sandbox pausing is handled directly by
+        # the polling monitor in the webhook router instead.
         callback.status = EventCallbackStatus.COMPLETED
 
         return EventCallbackResult(

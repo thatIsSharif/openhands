@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import socket
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import AsyncGenerator
@@ -9,11 +10,11 @@ from typing import AsyncGenerator
 import base62
 import docker
 import httpx
-from docker.errors import APIError, NotFound
+from docker.errors import APIError, ImageNotFound, NotFound
 from fastapi import Request
+from openhands.agent_server.utils import utc_now
 from pydantic import BaseModel, ConfigDict, Field
 
-from openhands.agent_server.utils import utc_now
 from openhands.app_server.errors import SandboxError
 from openhands.app_server.sandbox.docker_sandbox_spec_service import get_docker_client
 from openhands.app_server.sandbox.sandbox_models import (
@@ -150,11 +151,14 @@ class DockerSandboxService(SandboxService):
         except (ValueError, AttributeError):
             created_at = utc_now()
 
-        # Get URL and session key for running containers
+        # Get URL and session key for running/paused containers.
+        # Port mappings and env vars are still available on paused containers,
+        # so we populate exposed_urls for both states to allow callers to
+        # construct the agent server URL even before resuming.
         exposed_urls = None
         session_api_key = None
 
-        if status == SandboxStatus.RUNNING:
+        if status in (SandboxStatus.RUNNING, SandboxStatus.PAUSED):
             # Get session API key first
             env = self._get_container_env_vars(container)
             session_api_key = env.get(SESSION_API_KEY_VARIABLE)
@@ -221,6 +225,10 @@ class DockerSandboxService(SandboxService):
             )
             return None
 
+        # Read snapshot_name from container labels (set during commit)
+        labels = container.attrs.get('Config', {}).get('Labels', {}) or {}
+        snapshot_name = labels.get('snapshot_name', None)
+
         return SandboxInfo(
             id=container.name,
             created_by_user_id=None,
@@ -229,12 +237,14 @@ class DockerSandboxService(SandboxService):
             session_api_key=session_api_key,
             exposed_urls=exposed_urls,
             created_at=created_at,
+            snapshot_name=snapshot_name,
         )
 
     async def _container_to_checked_sandbox_info(self, container) -> SandboxInfo | None:
         sandbox_info = await self._container_to_sandbox_info(container)
         if (
             sandbox_info
+            and sandbox_info.status == SandboxStatus.RUNNING
             and self.health_check_path is not None
             and sandbox_info.exposed_urls
         ):
@@ -547,11 +557,185 @@ class DockerSandboxService(SandboxService):
         except (NotFound, APIError):
             return False
 
+    async def snapshot_sandbox(self, sandbox_id: str) -> str | None:
+        """Create a Docker image snapshot of the sandbox for disaster recovery.
+
+        Uses ``docker commit`` to create a snapshot image of the container's
+        current filesystem. The snapshot image is tagged with the sandbox ID
+        and a timestamp so it can be found later.
+
+        Args:
+            sandbox_id: The sandbox ID to snapshot.
+
+        Returns:
+            Snapshot image tag (e.g. ``oh-snapshot-<sandbox_id>-<ts>``)
+            if successful, ``None`` if the sandbox does not exist.
+        """
+        try:
+            if not sandbox_id.startswith(self.container_name_prefix):
+                return None
+            container = self.docker_client.containers.get(sandbox_id)
+
+            timestamp = int(time.time())
+            snapshot_name = f'oh-snapshot-{sandbox_id}-{timestamp}'.lower()
+
+            container.commit(
+                repository=snapshot_name,
+                labels={
+                    'sandbox_id': sandbox_id,
+                    'snapshot_name': snapshot_name,
+                    'created_at': str(timestamp),
+                },
+            )
+
+            _logger.info(
+                f'Created snapshot {snapshot_name} for sandbox {sandbox_id}'
+            )
+            return snapshot_name
+
+        except (NotFound, APIError) as e:
+            _logger.warning(
+                f'Failed to snapshot sandbox {sandbox_id}: {e}'
+            )
+            return None
+
+    async def restore_from_snapshot(
+        self, snapshot_name: str, sandbox_id: str
+    ) -> SandboxInfo | None:
+        """Restore a sandbox from a previously taken Docker snapshot.
+
+        Creates a new container from the snapshot image, using the same
+        port mappings, volume mounts, and environment configuration as
+        the standard sandbox setup.
+
+        Args:
+            snapshot_name: The snapshot image tag to restore from.
+            sandbox_id: The sandbox ID to assign to the restored sandbox.
+
+        Returns:
+            SandboxInfo for the restored sandbox, or None if the snapshot
+            image does not exist.
+        """
+        try:
+            # Check that the snapshot image exists
+            try:
+                self.docker_client.images.get(snapshot_name)
+            except ImageNotFound:
+                _logger.error(
+                    f'Snapshot image {snapshot_name} not found '
+                    f'for restore to sandbox {sandbox_id}'
+                )
+                return None
+
+            container_name = f'{self.container_name_prefix}{sandbox_id}'
+            session_api_key = base62.encodebytes(os.urandom(32))
+
+            # Build env vars for the new container
+            env_vars: dict[str, str] = {
+                SESSION_API_KEY_VARIABLE: session_api_key,
+                WEBHOOK_CALLBACK_VARIABLE: (
+                    f'http://host.docker.internal:{self.host_port}'
+                    f'/api/v1/webhooks'
+                ),
+            }
+
+            # Set CORS origins
+            cors_origins: list[str] = []
+            if self.web_url:
+                cors_origins.append(self.web_url)
+            cors_origins.extend(self.permitted_cors_origins)
+            seen: set[str] = set()
+            for origin in cors_origins:
+                if origin not in seen:
+                    seen.add(origin)
+                    idx = len(seen) - 1
+                    env_vars[f'OH_ALLOW_CORS_ORIGINS_{idx}'] = origin
+
+            # Prepare port mappings
+            port_mappings: dict[int, int] | None = None
+            if self.use_host_network:
+                for exposed_port in self.exposed_ports:
+                    env_vars[exposed_port.name] = str(
+                        exposed_port.container_port
+                    )
+            else:
+                port_mappings = {}
+                for exposed_port in self.exposed_ports:
+                    host_port = self._find_unused_port()
+                    port_mappings[exposed_port.container_port] = host_port
+                    env_vars[exposed_port.name] = str(
+                        exposed_port.container_port
+                    )
+
+            # Prepare volumes
+            volumes = {
+                mount.host_path: {
+                    'bind': mount.container_path,
+                    'mode': mount.mode,
+                }
+                for mount in self.mounts
+            }
+
+            # Determine network mode
+            network_mode = 'host' if self.use_host_network else None
+
+            # Create and start the container from snapshot
+            container = self.docker_client.containers.run(
+                image=snapshot_name,
+                remove=False,
+                name=container_name,
+                environment=env_vars,
+                ports=port_mappings,
+                volumes=volumes,
+                labels={
+                    'sandbox_id': sandbox_id,
+                    'snapshot_name': snapshot_name,
+                    'restored_from': snapshot_name,
+                },
+                detach=True,
+                init=True,
+                extra_hosts=(
+                    self.extra_hosts
+                    if self.extra_hosts and not self.use_host_network
+                    else None
+                ),
+                network_mode=network_mode,
+            )
+
+            sandbox_info = await self._container_to_sandbox_info(container)
+            assert sandbox_info is not None
+            _logger.info(
+                f'Restored sandbox {sandbox_id} from snapshot '
+                f'{snapshot_name}'
+            )
+            return sandbox_info
+
+        except (NotFound, APIError) as e:
+            _logger.error(
+                f'Failed to restore sandbox {sandbox_id} from '
+                f'snapshot {snapshot_name}: {e}'
+            )
+            return None
+
     async def delete_sandbox(self, sandbox_id: str) -> bool:
-        """Delete a sandbox."""
+        """Delete a sandbox.
+
+        Automatically creates a Docker snapshot before destroying the
+        container, enabling disaster recovery if the sandbox needs to
+        be restored later.
+        """
         try:
             if not sandbox_id.startswith(self.container_name_prefix):
                 return False
+
+            # Snapshot before destroy for disaster recovery
+            snapshot_name = await self.snapshot_sandbox(sandbox_id)
+            if snapshot_name:
+                _logger.info(
+                    f'Created pre-delete snapshot {snapshot_name} '
+                    f'for sandbox {sandbox_id}'
+                )
+
             container = self.docker_client.containers.get(sandbox_id)
 
             # Stop the container if it's running
