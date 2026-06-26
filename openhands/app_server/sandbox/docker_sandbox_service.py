@@ -573,7 +573,7 @@ class DockerSandboxService(SandboxService):
             container = self.docker_client.containers.get(sandbox_id)
 
             timestamp = int(time.time())
-            snapshot_name = f'oh-snapshot-{sandbox_id}-{timestamp}'
+            snapshot_name = f'oh-snapshot-{sandbox_id}-{timestamp}'.lower()
 
             container.commit(
                 repository=snapshot_name,
