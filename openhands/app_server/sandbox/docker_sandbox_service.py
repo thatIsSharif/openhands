@@ -244,6 +244,7 @@ class DockerSandboxService(SandboxService):
         sandbox_info = await self._container_to_sandbox_info(container)
         if (
             sandbox_info
+            and sandbox_info.status == SandboxStatus.RUNNING
             and self.health_check_path is not None
             and sandbox_info.exposed_urls
         ):
