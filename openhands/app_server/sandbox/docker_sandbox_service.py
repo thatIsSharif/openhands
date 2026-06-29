@@ -155,7 +155,7 @@ class DockerSandboxService(SandboxService):
         exposed_urls = None
         session_api_key = None
 
-        if status == SandboxStatus.RUNNING:
+        if status in (SandboxStatus.RUNNING, SandboxStatus.PAUSED):
             # Get session API key first
             env = self._get_container_env_vars(container)
             session_api_key = env.get(SESSION_API_KEY_VARIABLE)
@@ -239,6 +239,14 @@ class DockerSandboxService(SandboxService):
 
     async def _container_to_checked_sandbox_info(self, container) -> SandboxInfo | None:
         sandbox_info = await self._container_to_sandbox_info(container)
+
+        # Skip health check for paused containers - they fail health check
+        # because agent server is frozen, but we need exposed_urls to resume
+        state = container.attrs.get('State', {})
+        if state.get('Paused'):
+            _logger.debug(f'Sandbox {sandbox_info.id} is paused, skipping health check')
+            return sandbox_info
+
         if (
             sandbox_info
             and self.health_check_path is not None

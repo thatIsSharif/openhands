@@ -43,6 +43,7 @@ from openhands.app_server.utils.docker_utils import (
 )
 from openhands.app_server.utils.jira import add_comment
 from openhands.app_server.utils.logger import openhands_logger as logger
+from openhands.app_server.sandbox.sandbox_models import SandboxStatus
 
 
 class JiraCommentRequest(BaseModel):
@@ -186,14 +187,31 @@ async def _handle_comment_created(
                 f'{conversation_id} not found'
             )
             return False
-
-        if sandbox.status == 'PAUSED' or sandbox.status == 'paused':
+        if sandbox.status == SandboxStatus.PAUSED:
             logger.info(
                 f'[Automation] Resuming sandbox {sandbox_id} for '
                 f'{issue_key}'
             )
             await sandbox_service.resume_sandbox(sandbox_id)
-        elif sandbox.status == 'MISSING' or sandbox.status == 'missing':
+
+            # Wait for sandbox to be fully ready
+            try:
+                await sandbox_service.wait_for_sandbox_running(
+                    sandbox_id,
+                    timeout=60,
+                    poll_interval=2,
+                )
+            except TimeoutError:
+                logger.error(
+                    f'[Automation] Sandbox {sandbox_id} did not become ready '
+                    f'after 60 seconds'
+                )
+                return False
+
+            # Refresh sandbox info after resume
+            sandbox = await sandbox_service.get_sandbox(sandbox_id)
+
+        elif sandbox.status == SandboxStatus.MISSING:
             logger.warning(
                 f'[Automation] Sandbox {sandbox_id} for {issue_key} '
                 'is missing, cannot resume'
@@ -264,7 +282,7 @@ async def _handle_comment_created(
                     if sandbox.session_api_key
                     else {}
                 ),
-                timeout=30.0,
+                timeout=60.0,
             )
             response.raise_for_status()
 
@@ -274,9 +292,10 @@ async def _handle_comment_created(
             )
 
         except Exception as e:
+            import traceback
             logger.error(
                 f'[Automation] Failed to send comment for {issue_key} '
-                f'to conversation {conversation_id}: {e}'
+                f'to conversation {conversation_id}: {type(e).__name__}: {e}\n'
             )
 
     return True
