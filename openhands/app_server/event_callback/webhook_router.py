@@ -37,7 +37,7 @@ from openhands.app_server.event_callback.set_title_callback_processor import (
     SetTitleCallbackProcessor,
 )
 from openhands.app_server.integrations.provider import ProviderType
-from openhands.app_server.sandbox.sandbox_models import SandboxRecord
+from openhands.app_server.sandbox.sandbox_models import SandboxRecord, SandboxStatus
 from openhands.app_server.services.injector import InjectorState
 from openhands.app_server.services.jwt_service import JwtService
 from openhands.app_server.user.auth_user_context import AuthUserContext
@@ -452,6 +452,8 @@ async def on_event(
                 await app_conversation_info_service.save_app_conversation_info(info)
 
         # Analytics: conversation terminal state detection
+        # also collect Jira sandbox IDs to pause after callbacks complete
+        jira_sandbox_to_pause: str | None = None
         for event in events:
             if not isinstance(event, ConversationStateUpdateEvent):
                 continue
@@ -463,12 +465,18 @@ async def on_event(
                     await _track_conversation_terminal(
                         conversation_id, app_conversation_info, events, exec_status
                     )
+                    # Auto-pause sandbox for Jira automation conversations
+                    if app_conversation_info.jira_issue_key:
+                        jira_sandbox_to_pause = app_conversation_info.sandbox_id
             except Exception:
                 _logger.exception('analytics:conversation_terminal:failed')
 
         asyncio.create_task(
             _run_callbacks_in_bg_and_close(
-                conversation_id, app_conversation_info.created_by_user_id, events
+                conversation_id,
+                app_conversation_info.created_by_user_id,
+                events,
+                sandbox_id=jira_sandbox_to_pause,
             )
         )
 
@@ -514,12 +522,43 @@ async def get_secret(
         raise HTTPException(status.HTTP_401_UNAUTHORIZED)
 
 
+async def _pause_jira_sandbox(sandbox_id: str, user_id: str | None) -> None:
+    """Pause the sandbox for a completed Jira automation conversation.
+
+    Runs after all callbacks have completed to avoid racing
+    against callbacks (e.g. SetTitleCallbackProcessor) that
+    communicate with the agent server inside the sandbox.
+    """
+    try:
+        state = InjectorState()
+        if user_id:
+            setattr(state, USER_CONTEXT_ATTR, SpecifyUserContext(user_id=user_id))
+
+        injector = get_global_config().sandbox
+        if injector is None:
+            return
+
+        async with injector.context(state) as sandbox_service:
+            sandbox = await sandbox_service.get_sandbox(sandbox_id)
+            if sandbox and sandbox.status == SandboxStatus.RUNNING:
+                await sandbox_service.pause_sandbox(sandbox_id)
+                _logger.info(
+                    '[Webhook] Paused sandbox %s for completed Jira conversation',
+                    sandbox_id,
+                )
+    except Exception:
+        _logger.exception(
+            '[Webhook] Failed to pause sandbox %s', sandbox_id
+        )
+
+
 async def _run_callbacks_in_bg_and_close(
     conversation_id: UUID,
     user_id: str | None,
     events: list[Event],
-):
-    """Run all callbacks and close the session"""
+    sandbox_id: str | None = None,
+) -> None:
+    """Run all callbacks and close the session."""
     state = InjectorState()
     setattr(state, USER_CONTEXT_ATTR, SpecifyUserContext(user_id=user_id))
 
@@ -527,6 +566,10 @@ async def _run_callbacks_in_bg_and_close(
         # We don't use asynio.gather here because callbacks must be run in sequence.
         for event in events:
             await event_callback_service.execute_callbacks(conversation_id, event)
+
+    # Pause Jira sandbox after callbacks complete to avoid racing
+    if sandbox_id:
+        await _pause_jira_sandbox(sandbox_id, user_id)
 
 
 def _import_all_tools():
