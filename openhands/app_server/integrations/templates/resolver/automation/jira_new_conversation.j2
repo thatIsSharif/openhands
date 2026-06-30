@@ -102,6 +102,16 @@ General workflow:
      "issue_key": "{{ issue_key }}",
      "body": "Summary of changes implemented\nKey files: ...\nPRs: <url1>, <url2>, ..."
    }
+9. After posting the summary comment, also post the token usage by sending
+   a POST request to:
+   POST {{ token_usage_endpoint }}
+   {
+     "issue_key": "{{ issue_key }}",
+     "body": ""
+   }
+   (The endpoint will automatically fetch metrics and create or update
+   a single token-usage comment per issue, identified by the
+   "*OpenHands Automation Complete*" marker.)
 
 {% if other_repos %}
 ## Important Notes
@@ -112,3 +122,8 @@ General workflow:
 - Post a single Jira comment at the very end with links to ALL PRs created
 - If a repository needs no changes, skip it
 {% endif %}
+
+## Final Step (Always Required)
+After completing ALL work and posting the summary comment, always call the
+token-usage endpoint (step 9 above) so cost and token metrics are recorded
+on the Jira issue.

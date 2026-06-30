@@ -21,6 +21,8 @@ from fastapi import APIRouter, BackgroundTasks, Request
 from pydantic import BaseModel
 
 from openhands.agent_server.models import OpenHandsModel
+from openhands.app_server.services.injector import InjectorState
+from openhands.app_server.user.specifiy_user_context import ADMIN, USER_CONTEXT_ATTR
 from openhands.app_server.automation.execution_service import (
     ExecutionService,
 )
@@ -37,11 +39,17 @@ from openhands.app_server.config import (
     get_httpx_client,
     get_sandbox_service,
 )
-from openhands.app_server.sandbox.sandbox_models import AGENT_SERVER
 from openhands.app_server.utils.docker_utils import (
     replace_localhost_hostname_for_docker,
 )
-from openhands.app_server.utils.jira import add_comment
+
+from openhands.app_server.utils.jira import (
+    _get_agent_url_from_sandbox,
+    add_comment,
+    add_or_update_token_usage_comment,
+    build_token_usage_comment,
+    fetch_live_agent_metrics,
+)
 from openhands.app_server.utils.logger import openhands_logger as logger
 from openhands.app_server.sandbox.sandbox_models import SandboxStatus
 
@@ -236,12 +244,7 @@ async def _handle_comment_created(
                 )
                 return True
 
-            agent_server_url = None
-            for exposed_url in sandbox.exposed_urls:
-                if exposed_url.name == AGENT_SERVER:
-                    agent_server_url = exposed_url.url
-                    break
-
+            agent_server_url = _get_agent_url_from_sandbox(sandbox)
             if not agent_server_url:
                 logger.warning(
                     f'[Automation] Cannot send message for {issue_key}: '
@@ -253,11 +256,24 @@ async def _handle_comment_created(
                 agent_server_url
             )
 
-            # Build the message: include both the comment body and
-            # the Jira issue reference
+            # Build the token-usage endpoint from the request
+            base_url = str(request.base_url).rstrip('/')
+            token_usage_url = (
+                f'{base_url}/api/v1/jira/start/token-usage'
+            )
+
+            # Build the message: include the comment body, issue reference,
+            # and instruction to post token usage when done
             message_text = (
                 f'**[Jira comment on {issue_key}]**\n\n'
-                f'{comment_body}'
+                f'{comment_body}\n\n'
+                f'---\n'
+                f'When you finish addressing this, post token usage metrics '
+                f'by sending a POST request to:\n'
+                f'POST {token_usage_url}\n'
+                f'{{"issue_key": "{issue_key}", "body": ""}}\n'
+                f'(Uses X-Session-API-Key auth. Creates or updates a single '
+                f'token-usage comment per issue.)'
             )
 
             response = await httpx_client.post(
@@ -408,3 +424,107 @@ async def post_jira_comment(req: JiraCommentRequest) -> dict:
 
     result = add_comment(req.issue_key, req.body)
     return {'status': 'ok', 'comment_id': result['id']}
+
+
+@router.post('/token-usage')
+async def post_jira_token_usage(
+    req: JiraCommentRequest,
+    request: Request,
+) -> dict:
+    """Post/update a beautified token-usage comment on a Jira issue.
+
+    Called by the agent at task completion. Fetches LIVE metrics from
+    the agent server (not the DB) and posts or updates a single comment
+    per issue (identified by the 🎯 *OpenHands Automation Complete* marker).
+    """
+    from openhands.app_server.config import (
+        get_app_conversation_info_service,
+        get_httpx_client,
+    )
+    from openhands.app_server.sandbox.session_auth import (
+        validate_session_key,
+    )
+
+    # Validate session and find sandbox
+    session_api_key = request.headers.get('X-Session-API-Key', '')
+    sandbox = await validate_session_key(session_api_key)
+
+    agent_server_url = _get_agent_url_from_sandbox(sandbox)
+    if not agent_server_url:
+        return {'status': 'error', 'message': 'No agent server URL'}
+
+    # Find the conversation ID for this sandbox
+    state = InjectorState()
+    setattr(state, USER_CONTEXT_ATTR, ADMIN)
+    async with get_app_conversation_info_service(state) as info_service:
+        page = await info_service.search_app_conversation_info(
+            sandbox_id__eq=sandbox.id, limit=1,
+        )
+
+    conv_info = page.items[0] if page.items else None
+    if not conv_info:
+        return {'status': 'error', 'message': 'No conversation found'}
+
+    conversation_id = str(conv_info.id)
+
+    # Fetch live metrics from agent server, fall back to DB
+    async with get_httpx_client(state) as httpx_client:
+        live = await fetch_live_agent_metrics(
+            agent_server_url, conversation_id, session_api_key,
+            httpx_client,
+        )
+
+    if not live and conv_info.metrics:
+        m = conv_info.metrics
+        live = {
+            'accumulated_cost': m.accumulated_cost,
+            'model_name': m.model_name,
+            'prompt_tokens': (
+                m.accumulated_token_usage.prompt_tokens
+                if m.accumulated_token_usage else 0
+            ),
+            'completion_tokens': (
+                m.accumulated_token_usage.completion_tokens
+                if m.accumulated_token_usage else 0
+            ),
+            'cache_read_tokens': (
+                m.accumulated_token_usage.cache_read_tokens
+                if m.accumulated_token_usage else 0
+            ),
+            'cache_write_tokens': (
+                m.accumulated_token_usage.cache_write_tokens
+                if m.accumulated_token_usage else 0
+            ),
+            'reasoning_tokens': (
+                m.accumulated_token_usage.reasoning_tokens
+                if m.accumulated_token_usage else 0
+            ),
+        }
+
+    # Look up execution record for budget info
+    store = ExecutionStore()
+    record = await store.get_execution_by_conversation_id(conversation_id)
+    max_budget = (
+        record.max_budget
+        if record and record.max_budget and record.max_budget > 0
+        else None
+    )
+
+    comment_body = build_token_usage_comment(
+        accumulated_cost=live.get('accumulated_cost', 0.0),
+        model_name=live.get('model_name', 'default'),
+        prompt_tokens=live.get('prompt_tokens', 0),
+        completion_tokens=live.get('completion_tokens', 0),
+        cache_read_tokens=live.get('cache_read_tokens', 0),
+        cache_write_tokens=live.get('cache_write_tokens', 0),
+        reasoning_tokens=live.get('reasoning_tokens', 0),
+        max_budget=max_budget,
+        created_at=live.get('created_at'),
+        updated_at=live.get('updated_at'),
+    )
+
+    result = add_or_update_token_usage_comment(req.issue_key, comment_body)
+    logger.info(
+        f'[Automation] Token usage comment posted/updated on {req.issue_key}'
+    )
+    return {'status': 'ok', 'comment_id': result.get('id', '')}

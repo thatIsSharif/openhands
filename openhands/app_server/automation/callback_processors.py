@@ -84,7 +84,7 @@ class AutomationEventCallbackProcessor(EventCallbackProcessor):
         )
 
         logger.info(
-            f'[Automation] Execution {record.execution_id} → {new_state.value} '
+            f'[Automation] Execution {record.execution_id} -> {new_state.value} '
             f'(conversation: {conversation_id})',
             extra=build_log_context(
                 execution_id=record.execution_id,
@@ -101,3 +101,5 @@ class AutomationEventCallbackProcessor(EventCallbackProcessor):
             event_id=event.id,
             conversation_id=conversation_id,
         )
+
+

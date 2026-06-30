@@ -370,9 +370,10 @@ class JiraAutomationService:
             execution_id, ExecutionState.QUEUED
         )
 
-        # Build the full comment endpoint URL from the incoming request
+        # Build the full endpoint URLs from the incoming request
         base_url = str(request.base_url).rstrip('/')
         comment_endpoint = f'{base_url}/api/v1/jira/start/comment'
+        token_usage_endpoint = f'{base_url}/api/v1/jira/start/token-usage'
 
         # Build prompt from template with full context
         # Include all other repos for potential cloning
@@ -389,6 +390,7 @@ class JiraAutomationService:
             default_branch=default_branch,
             branch=branch,
             comment_endpoint=comment_endpoint,
+            token_usage_endpoint=token_usage_endpoint,
             other_repos=other_repos_info,
         )
 
