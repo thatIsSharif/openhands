@@ -516,13 +516,20 @@ async def post_jira_token_usage(
             )
             if live_resp.status_code == 200:
                 live_data = live_resp.json()
-                # Navigate to metrics
+                # Navigate to metrics from stats.usage_to_metrics.agent
                 stats = live_data.get('stats') or {}
-                combined = stats.get('combined_metrics') or {}
-                accumulated_cost = combined.get('accumulated_cost', 0.0)
-                model_name = combined.get('model_name', 'default')
+                usage_to_metrics = stats.get('usage_to_metrics') or {}
+                agent_metrics = usage_to_metrics.get('agent') or {}
+                accumulated_cost = agent_metrics.get(
+                    'accumulated_cost', 0.0
+                )
+                model_name = agent_metrics.get(
+                    'model_name', 'default'
+                )
 
-                usage = combined.get('accumulated_token_usage') or {}
+                usage = (
+                    agent_metrics.get('accumulated_token_usage') or {}
+                )
                 prompt_tokens = usage.get('prompt_tokens', 0)
                 completion_tokens = usage.get('completion_tokens', 0)
                 cache_read_tokens = usage.get('cache_read_tokens', 0)
