@@ -131,12 +131,12 @@ async def _handle_comment_created(
 
     If the comment contains @openhands, looks up an existing conversation
     for the issue. If found, resumes the sandbox and forwards the comment
-    as a message. If not found, returns False so the caller can fall
-    through to the normal issue-creation flow.
+    as a message. If not found, creates a new conversation for the issue.
 
     Returns:
-        True if the comment was handled (conversation found and resumed),
-        False if no matching conversation exists.
+        True if the comment was handled (conversation found and resumed,
+        or new conversation created), False if the comment does not
+        mention @openhands.
     """
     issue = payload.get('issue', {})
     issue_key = issue.get('key')
@@ -172,9 +172,29 @@ async def _handle_comment_created(
     if not conversation:
         logger.info(
             f'[Automation] No existing conversation found for {issue_key}, '
-            'falling through to new conversation creation'
+            'creating a new conversation'
         )
-        return False
+        store = ExecutionStore()
+        execution_service = ExecutionService(store=store)
+        openhands_client = OpenHandsClient()
+
+        jira_service = JiraAutomationService(
+            execution_service=execution_service,
+            openhands_client=openhands_client,
+        )
+
+        result = await jira_service.process_issue_created(
+            payload=payload,
+            state=request.state,
+            request=request,
+        )
+
+        logger.info(
+            f'[Automation] New conversation created for {issue_key} '
+            f'via @openhands comment: {result.get("status")} '
+            f'(execution: {result.get("execution_id", "N/A")})'
+        )
+        return True
 
     conversation_id = conversation.id
     sandbox_id = conversation.sandbox_id
@@ -191,9 +211,30 @@ async def _handle_comment_created(
         if sandbox is None:
             logger.warning(
                 f'[Automation] Sandbox {sandbox_id} for conversation '
-                f'{conversation_id} not found'
+                f'{conversation_id} not found, creating new conversation'
             )
-            return False
+            store = ExecutionStore()
+            execution_service = ExecutionService(store=store)
+            openhands_client = OpenHandsClient()
+
+            jira_service = JiraAutomationService(
+                execution_service=execution_service,
+                openhands_client=openhands_client,
+            )
+
+            result = await jira_service.process_issue_created(
+                payload=payload,
+                state=request.state,
+                request=request,
+            )
+
+            logger.info(
+                f'[Automation] New conversation created for {issue_key} '
+                f'via @openhands comment (sandbox missing): '
+                f'{result.get("status")} '
+                f'(execution: {result.get("execution_id", "N/A")})'
+            )
+            return True
         if sandbox.status == SandboxStatus.PAUSED:
             logger.info(
                 f'[Automation] Resuming sandbox {sandbox_id} for '
@@ -213,7 +254,7 @@ async def _handle_comment_created(
                     f'[Automation] Sandbox {sandbox_id} did not become ready '
                     f'after 60 seconds'
                 )
-                return False
+                return True
 
             # Refresh sandbox info after resume
             sandbox = await sandbox_service.get_sandbox(sandbox_id)
@@ -221,9 +262,30 @@ async def _handle_comment_created(
         elif sandbox.status == SandboxStatus.MISSING:
             logger.warning(
                 f'[Automation] Sandbox {sandbox_id} for {issue_key} '
-                'is missing, cannot resume'
+                'is missing, cannot resume, creating new conversation'
             )
-            return False
+            store = ExecutionStore()
+            execution_service = ExecutionService(store=store)
+            openhands_client = OpenHandsClient()
+
+            jira_service = JiraAutomationService(
+                execution_service=execution_service,
+                openhands_client=openhands_client,
+            )
+
+            result = await jira_service.process_issue_created(
+                payload=payload,
+                state=request.state,
+                request=request,
+            )
+
+            logger.info(
+                f'[Automation] New conversation created for {issue_key} '
+                f'via @openhands comment (sandbox missing): '
+                f'{result.get("status")} '
+                f'(execution: {result.get("execution_id", "N/A")})'
+            )
+            return True
 
     # Send the comment as a message to the conversation
     async with get_httpx_client(
@@ -333,12 +395,6 @@ async def _process_jira_event(
                     f'{payload.get("issue", {}).get("key")} handled'
                 )
                 return
-            # If not handled (no existing conversation), fall through
-            # to create a new conversation via the assignment flow
-            logger.info(
-                '[Automation] Comment not handled by existing conversation, '
-                'falling through to issue assignment flow'
-            )
 
         # Read target account ID from environment (set JIRA_TARGET_ACCOUNT_ID)
         target_account_id = os.environ.get('JIRA_TARGET_ACCOUNT_ID', '')
