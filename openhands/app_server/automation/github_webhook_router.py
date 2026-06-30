@@ -17,6 +17,8 @@ Flow:
 
 from __future__ import annotations
 
+import traceback
+
 from fastapi import APIRouter, BackgroundTasks, Request
 from pydantic import BaseModel
 
@@ -32,23 +34,25 @@ from openhands.app_server.automation.github_automation_service import (
 from openhands.app_server.automation.openhands_client import (
     OpenHandsClient,
 )
+from openhands.app_server.automation.prompt_renderer import render_prompt
 from openhands.app_server.config import (
     get_app_conversation_info_service,
     get_httpx_client,
     get_sandbox_service,
 )
-from openhands.app_server.sandbox.sandbox_models import SandboxStatus
+from openhands.app_server.sandbox.sandbox_models import AGENT_SERVER, SandboxStatus
+from openhands.app_server.services.injector import InjectorState
+from openhands.app_server.user.specifiy_user_context import ADMIN, USER_CONTEXT_ATTR
 from openhands.app_server.utils.docker_utils import (
     replace_localhost_hostname_for_docker,
 )
 from openhands.app_server.utils.github import add_pr_comment
 from openhands.app_server.utils.logger import openhands_logger as logger
+from openhands.app_server.utils.sandbox_utils import pause_sandbox
 
 
 def _get_agent_url_from_sandbox(sandbox) -> str | None:
     """Extract the agent server URL from a sandbox's exposed URLs."""
-    from openhands.app_server.sandbox.sandbox_models import AGENT_SERVER
-
     for exposed_url in (sandbox.exposed_urls or []):
         if exposed_url.name == AGENT_SERVER:
             return exposed_url.url
@@ -404,20 +408,20 @@ async def _process_github_review_submitted(
                 agent_server_url
             )
 
-            # Build the review message
+            # Build the review message from the existing-conversation template
             state_label = {
                 'approved': '✅ Approved',
                 'changes_requested': '🔧 Changes Requested',
                 'comment': '💬 Comment',
             }.get(review_state, f'📝 Review ({review_state})')
 
-            message_text = (
-                f'**[{state_label} on {full_name} PR #{pr_number}]**\n\n'
-                f'**Reviewer:** {reviewer}\n\n'
-                f'{review_comment}\n\n'
-                f'---\n'
-                f'Please address the review feedback and update the '
-                f'pull request accordingly.'
+            message_text = render_prompt(
+                'github_review_submitted_existing_conversation.j2',
+                state_label=state_label,
+                full_name=full_name,
+                pr_number=pr_number,
+                reviewer=reviewer,
+                review_comment=review_comment,
             )
 
             response = await httpx_client.post(
@@ -452,8 +456,6 @@ async def _process_github_review_submitted(
             )
 
         except Exception:
-            import traceback
-
             logger.error(
                 f'[Automation] Failed to send message for PR #{pr_number} '
                 f'to conversation {conversation_id}: '
@@ -478,15 +480,6 @@ async def post_github_pr_comment(
     # Pause sandbox after task completion
     try:
         pr_url = f'https://github.com/{req.repository}/pull/{req.pr_number}'
-        from openhands.app_server.config import (
-            get_app_conversation_info_service,
-        )
-        from openhands.app_server.services.injector import InjectorState
-        from openhands.app_server.user.specifiy_user_context import (
-            ADMIN,
-            USER_CONTEXT_ATTR,
-        )
-
         state = InjectorState()
         setattr(state, USER_CONTEXT_ATTR, ADMIN)
         async with get_app_conversation_info_service(
@@ -497,12 +490,8 @@ async def post_github_pr_comment(
             )
 
         if conversation and conversation.sandbox_id:
-            from openhands.app_server.utils.sandbox_utils import pause_sandbox
-
             await pause_sandbox(conversation.sandbox_id, state, request)
     except Exception:
-        import traceback
-
         logger.error(
             '[Automation] Failed to pause sandbox for PR %s #%d: %s',
             req.repository,

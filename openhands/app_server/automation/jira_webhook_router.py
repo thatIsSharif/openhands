@@ -16,6 +16,8 @@ Supports:
 from __future__ import annotations
 
 import os
+import re
+import traceback
 
 from fastapi import APIRouter, BackgroundTasks, Request
 from pydantic import BaseModel
@@ -32,12 +34,14 @@ from openhands.app_server.automation.jira_automation_service import (
 from openhands.app_server.automation.openhands_client import (
     OpenHandsClient,
 )
+from openhands.app_server.automation.prompt_renderer import render_prompt
 from openhands.app_server.config import (
     get_app_conversation_info_service,
     get_httpx_client,
     get_sandbox_service,
 )
 from openhands.app_server.sandbox.sandbox_models import SandboxStatus
+from openhands.app_server.sandbox.session_auth import validate_session_key
 from openhands.app_server.services.injector import InjectorState
 from openhands.app_server.user.specifiy_user_context import ADMIN, USER_CONTEXT_ATTR
 from openhands.app_server.utils.docker_utils import (
@@ -51,6 +55,7 @@ from openhands.app_server.utils.jira import (
     fetch_live_agent_metrics,
 )
 from openhands.app_server.utils.logger import openhands_logger as logger
+from openhands.app_server.utils.sandbox_utils import pause_sandbox
 
 
 class JiraCommentRequest(BaseModel):
@@ -323,18 +328,12 @@ async def _handle_comment_created(
                 f'{base_url}/api/v1/jira/start/token-usage'
             )
 
-            # Build the message: include the comment body, issue reference,
-            # and instruction to post token usage when done
-            message_text = (
-                f'**[Jira comment on {issue_key}]**\n\n'
-                f'{comment_body}\n\n'
-                f'---\n'
-                f'When you finish addressing this, post token usage metrics '
-                f'by sending a POST request to:\n'
-                f'POST {token_usage_url}\n'
-                f'{{"issue_key": "{issue_key}", "body": ""}}\n'
-                f'(Uses X-Session-API-Key auth. Creates or updates a single '
-                f'token-usage comment per issue.)'
+            # Render the message from the existing-conversation template
+            message_text = render_prompt(
+                'jira_existing_conversation.j2',
+                issue_key=issue_key,
+                comment_body=comment_body,
+                token_usage_url=token_usage_url,
             )
 
             response = await httpx_client.post(
@@ -468,8 +467,6 @@ async def _process_jira_event(
             )
 
     except Exception:
-        import traceback
-
         logger.error(traceback.format_exc())
 
 @router.post('/comment')
@@ -483,8 +480,6 @@ async def post_jira_comment(
     body and stores them in the conversation metadata for cross-referencing.
     LLM calls this — code handles the Jira API and metadata updates.
     """
-    import re
-
     result = add_comment(req.issue_key, req.body)
     comment_id = result.get('id', '')
 
@@ -496,15 +491,6 @@ async def post_jira_comment(
 
     if pr_urls:
         try:
-            from openhands.app_server.config import (
-                get_app_conversation_info_service,
-            )
-            from openhands.app_server.services.injector import InjectorState
-            from openhands.app_server.user.specifiy_user_context import (
-                ADMIN,
-                USER_CONTEXT_ATTR,
-            )
-
             state = InjectorState()
             setattr(state, USER_CONTEXT_ATTR, ADMIN)
             async with get_app_conversation_info_service(
@@ -536,16 +522,10 @@ async def post_jira_comment(
                     # Pause sandbox after task completion
                     if conversation.sandbox_id:
                         try:
-                            from openhands.app_server.utils.sandbox_utils import (
-                                pause_sandbox,
-                            )
-
                             await pause_sandbox(
                                 conversation.sandbox_id, state, request
                             )
                         except Exception:
-                            import traceback
-
                             logger.error(
                                 '[Automation] Failed to pause sandbox '
                                 'for Jira issue %s: %s',
@@ -553,8 +533,6 @@ async def post_jira_comment(
                                 traceback.format_exc(),
                             )
         except Exception:
-            import traceback
-
             logger.error(
                 '[Automation] Failed to update github_pr metadata '
                 'for Jira issue %s: %s',
@@ -576,14 +554,6 @@ async def post_jira_token_usage(
     the agent server (not the DB) and posts or updates a single comment
     per issue (identified by the 🎯 *OpenHands Automation Complete* marker).
     """
-    from openhands.app_server.config import (
-        get_app_conversation_info_service,
-        get_httpx_client,
-    )
-    from openhands.app_server.sandbox.session_auth import (
-        validate_session_key,
-    )
-
     # Validate session and find sandbox
     session_api_key = request.headers.get('X-Session-API-Key', '')
     sandbox = await validate_session_key(session_api_key)
@@ -670,12 +640,8 @@ async def post_jira_token_usage(
     # Pause sandbox after task completion
     if sandbox and sandbox.id:
         try:
-            from openhands.app_server.utils.sandbox_utils import pause_sandbox
-
             await pause_sandbox(sandbox.id, state, request)
         except Exception:
-            import traceback
-
             logger.error(
                 '[Automation] Failed to pause sandbox for Jira issue %s: %s',
                 req.issue_key,
