@@ -21,6 +21,8 @@ from fastapi import APIRouter, BackgroundTasks, Request
 from pydantic import BaseModel
 
 from openhands.agent_server.models import OpenHandsModel
+from openhands.app_server.services.injector import InjectorState
+from openhands.app_server.user.specifiy_user_context import ADMIN, USER_CONTEXT_ATTR
 from openhands.app_server.automation.execution_service import (
     ExecutionService,
 )
@@ -408,3 +410,107 @@ async def post_jira_comment(req: JiraCommentRequest) -> dict:
 
     result = add_comment(req.issue_key, req.body)
     return {'status': 'ok', 'comment_id': result['id']}
+
+
+@router.post('/token-usage')
+async def post_jira_token_usage(
+    req: JiraCommentRequest,
+    request: Request,
+) -> dict:
+    """Post or update a token-usage comment on a Jira issue.
+
+    Called by the agent at the end of a JIRA task. Uses the sandbox's
+    session API key to look up the conversation and fetch metrics, then
+    creates or updates a single token-usage comment per issue.
+    """
+    from openhands.app_server.config import (
+        get_app_conversation_info_service,
+    )
+    from openhands.app_server.sandbox.session_auth import (
+        validate_session_key,
+    )
+    from openhands.app_server.utils.jira import (
+        add_or_update_token_usage_comment,
+    )
+
+    # Validate the session API key to identify the sandbox
+    session_api_key = request.headers.get('X-Session-API-Key', '')
+    sandbox = await validate_session_key(session_api_key)
+
+    # Find the latest conversation for this sandbox
+    state = InjectorState()
+    setattr(state, USER_CONTEXT_ATTR, ADMIN)
+    async with get_app_conversation_info_service(
+        state
+    ) as info_service:
+        page = await info_service.search_app_conversation_info(
+            sandbox_id__eq=sandbox.id,
+            limit=1,
+        )
+
+    conv_info = page.items[0] if page.items else None
+    if not conv_info:
+        logger.warning(
+            f'[Automation] No conversation found for sandbox {sandbox.id}'
+        )
+        return {'status': 'error', 'message': 'No conversation found'}
+
+    metrics = conv_info.metrics
+    if not metrics:
+        logger.info(
+            f'[Automation] No metrics available for {req.issue_key}'
+        )
+        return {'status': 'error', 'message': 'No metrics available'}
+
+    # Build the comment body with token usage details
+    token_usage = metrics.accumulated_token_usage
+    lines = [
+        '*OpenHands Automation Complete*',
+        '',
+        f'*Total Cost:* ${metrics.accumulated_cost:.6f}',
+        f'*Model:* {metrics.model_name}',
+    ]
+
+    if token_usage:
+        lines.append('')
+        lines.append('*Token Usage:*')
+        lines.append(f'- Prompt tokens: {token_usage.prompt_tokens:,}')
+        lines.append(
+            f'- Completion tokens: {token_usage.completion_tokens:,}'
+        )
+        lines.append(
+            f'- Total tokens: '
+            f'{token_usage.prompt_tokens + token_usage.completion_tokens:,}'
+        )
+        if token_usage.cache_read_tokens:
+            lines.append(
+                f'- Cache read tokens: {token_usage.cache_read_tokens:,}'
+            )
+        if token_usage.cache_write_tokens:
+            lines.append(
+                f'- Cache write tokens: {token_usage.cache_write_tokens:,}'
+            )
+        if token_usage.reasoning_tokens:
+            lines.append(
+                f'- Reasoning tokens: {token_usage.reasoning_tokens:,}'
+            )
+
+    # Look up execution record for budget info
+    store = ExecutionStore()
+    record = await store.get_execution_by_conversation_id(
+        str(conv_info.id)
+    )
+    if record and record.max_budget and record.max_budget > 0:
+        pct = metrics.accumulated_cost / record.max_budget * 100
+        lines.append('')
+        lines.append(
+            f'*Budget Usage:* ${metrics.accumulated_cost:.4f}'
+            f' / ${record.max_budget:.4f} ({pct:.1f}%)'
+        )
+
+    comment_body = '\n'.join(lines)
+    result = add_or_update_token_usage_comment(req.issue_key, comment_body)
+    logger.info(
+        f'[Automation] Token usage comment posted/updated on {req.issue_key}'
+    )
+    return {'status': 'ok', 'comment_id': result.get('id', '')}
