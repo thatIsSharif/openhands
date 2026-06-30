@@ -519,19 +519,6 @@ async def post_jira_comment(
                             req.issue_key,
                         )
 
-                    # Pause sandbox after task completion
-                    if conversation.sandbox_id:
-                        try:
-                            await pause_sandbox(
-                                conversation.sandbox_id, state, request
-                            )
-                        except Exception:
-                            logger.error(
-                                '[Automation] Failed to pause sandbox '
-                                'for Jira issue %s: %s',
-                                req.issue_key,
-                                traceback.format_exc(),
-                            )
         except Exception:
             logger.error(
                 '[Automation] Failed to update github_pr metadata '

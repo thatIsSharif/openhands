@@ -419,7 +419,7 @@ async def _process_github_review_submitted(
                 'github_review_submitted_existing_conversation.j2',
                 state_label=state_label,
                 full_name=full_name,
-                pr_number=pr_number,
+                pr_url=pr_url,
                 reviewer=reviewer,
                 review_comment=review_comment,
             )
