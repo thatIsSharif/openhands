@@ -21,8 +21,6 @@ from fastapi import APIRouter, BackgroundTasks, Request
 from pydantic import BaseModel
 
 from openhands.agent_server.models import OpenHandsModel
-from openhands.app_server.services.injector import InjectorState
-from openhands.app_server.user.specifiy_user_context import ADMIN, USER_CONTEXT_ATTR
 from openhands.app_server.automation.execution_service import (
     ExecutionService,
 )
@@ -39,10 +37,12 @@ from openhands.app_server.config import (
     get_httpx_client,
     get_sandbox_service,
 )
+from openhands.app_server.sandbox.sandbox_models import SandboxStatus
+from openhands.app_server.services.injector import InjectorState
+from openhands.app_server.user.specifiy_user_context import ADMIN, USER_CONTEXT_ATTR
 from openhands.app_server.utils.docker_utils import (
     replace_localhost_hostname_for_docker,
 )
-
 from openhands.app_server.utils.jira import (
     _get_agent_url_from_sandbox,
     add_comment,
@@ -51,7 +51,6 @@ from openhands.app_server.utils.jira import (
     fetch_live_agent_metrics,
 )
 from openhands.app_server.utils.logger import openhands_logger as logger
-from openhands.app_server.sandbox.sandbox_models import SandboxStatus
 
 
 class JiraCommentRequest(BaseModel):
@@ -308,7 +307,6 @@ async def _handle_comment_created(
             )
 
         except Exception as e:
-            import traceback
             logger.error(
                 f'[Automation] Failed to send comment for {issue_key} '
                 f'to conversation {conversation_id}: {type(e).__name__}: {e}\n'
@@ -419,11 +417,69 @@ async def _process_jira_event(
         logger.error(traceback.format_exc())
 
 @router.post('/comment')
-async def post_jira_comment(req: JiraCommentRequest) -> dict:
-    """Post a comment to Jira. LLM calls this — code handles the Jira API."""
+async def post_jira_comment(
+    req: JiraCommentRequest,
+    request: Request,
+) -> dict:
+    """Post a comment to Jira and update conversation metadata with PR links.
+
+    After posting the comment, extracts any GitHub PR URLs from the comment
+    body and stores them in the conversation metadata for cross-referencing.
+    LLM calls this — code handles the Jira API and metadata updates.
+    """
+    import re
 
     result = add_comment(req.issue_key, req.body)
-    return {'status': 'ok', 'comment_id': result['id']}
+    comment_id = result.get('id', '')
+
+    # Extract GitHub PR URLs from the comment body
+    pr_urls = re.findall(
+        r'https://github\.com/[\w.-]+/[\w.-]+/pull/\d+',
+        req.body,
+    )
+
+    if pr_urls:
+        try:
+            from openhands.app_server.config import (
+                get_app_conversation_info_service,
+            )
+            from openhands.app_server.services.injector import InjectorState
+            from openhands.app_server.user.specifiy_user_context import (
+                ADMIN,
+                USER_CONTEXT_ATTR,
+            )
+
+            state = InjectorState()
+            setattr(state, USER_CONTEXT_ATTR, ADMIN)
+            async with get_app_conversation_info_service(
+                state, request
+            ) as info_service:
+                conversation = (
+                    await info_service.get_conversation_by_jira_issue_key(
+                        req.issue_key
+                    )
+                )
+                if conversation:
+                    conversation.github_pr = pr_urls
+                    await info_service.save_app_conversation_info(conversation)
+                    logger.info(
+                        '[Automation] Updated conversation %s github_pr '
+                        'with %d PR(s) for Jira issue %s',
+                        conversation.id,
+                        len(pr_urls),
+                        req.issue_key,
+                    )
+        except Exception:
+            import traceback
+
+            logger.error(
+                '[Automation] Failed to update github_pr metadata '
+                'for Jira issue %s: %s',
+                req.issue_key,
+                traceback.format_exc(),
+            )
+
+    return {'status': 'ok', 'comment_id': comment_id}
 
 
 @router.post('/token-usage')

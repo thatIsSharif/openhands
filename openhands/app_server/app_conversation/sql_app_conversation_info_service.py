@@ -121,6 +121,11 @@ class StoredConversationMetadata(Base):
         String, nullable=True, index=True
     )
 
+    # List of GitHub PR URLs created for the associated Jira issue
+    github_pr: Mapped[list[str] | None] = mapped_column(
+        create_json_type_decorator(list[str]), nullable=True
+    )
+
 
 @dataclass
 class SQLAppConversationInfoService(AppConversationInfoService):
@@ -404,6 +409,7 @@ class SQLAppConversationInfoService(AppConversationInfoService):
             public=info.public,
             tags=info.tags if info.tags else None,
             jira_issue_key=info.jira_issue_key,
+            github_pr=info.github_pr if info.github_pr else None,
         )
 
         await self.db_session.merge(stored)
@@ -594,6 +600,7 @@ class SQLAppConversationInfoService(AppConversationInfoService):
             public=stored.public,
             tags=stored.tags or {},
             jira_issue_key=stored.jira_issue_key,
+            github_pr=stored.github_pr or [],
             created_at=created_at,
             updated_at=updated_at,
         )
