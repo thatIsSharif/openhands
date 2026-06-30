@@ -371,6 +371,27 @@ class SQLAppConversationInfoService(AppConversationInfoService):
             return self._to_info(result, sub_conversation_ids=sub_conversation_ids)
         return None
 
+    async def get_conversation_by_pr_number(
+        self, pr_number: int
+    ) -> AppConversationInfo | None:
+        """Look up a V1 conversation by its GitHub PR number."""
+        query = await self._secure_select()
+        # Use SQLAlchemy JSON contains to find the PR number in the JSON array.
+        # For PostgreSQL this uses the @> operator; for SQLite it falls back
+        # to text-based matching since JSON arrays format numbers without
+        # extra whitespace.
+        query = query.where(
+            StoredConversationMetadata.pr_number.contains([pr_number])
+        )
+        result_set = await self.db_session.execute(query)
+        result = result_set.scalar_one_or_none()
+        if result:
+            sub_conversation_ids = await self.get_sub_conversation_ids(
+                UUID(result.conversation_id)
+            )
+            return self._to_info(result, sub_conversation_ids=sub_conversation_ids)
+        return None
+
     async def save_app_conversation_info(
         self, info: AppConversationInfo
     ) -> AppConversationInfo:

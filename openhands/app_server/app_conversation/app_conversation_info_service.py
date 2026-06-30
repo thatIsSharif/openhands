@@ -108,6 +108,19 @@ class AppConversationInfoService(ABC):
         """
 
     @abstractmethod
+    async def get_conversation_by_pr_number(
+        self, pr_number: int
+    ) -> AppConversationInfo | None:
+        """Look up a V1 conversation by its GitHub PR number.
+
+        Args:
+            pr_number: The GitHub PR number to look up.
+
+        Returns:
+            AppConversationInfo if found, None otherwise.
+        """
+
+    @abstractmethod
     async def save_app_conversation_info(
         self, info: AppConversationInfo
     ) -> AppConversationInfo:
