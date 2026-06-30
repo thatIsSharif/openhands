@@ -96,12 +96,10 @@ class AutomationEventCallbackProcessor(EventCallbackProcessor):
             ),
         )
 
-        # Post token usage to JIRA if this was a JIRA-triggered conversation
-        # that completed successfully
-        if (
-            new_state == ExecutionState.COMPLETED
-            and record.jira_issue_key
-        ):
+        # Post token usage to JIRA for any terminal event on a
+        # JIRA-triggered conversation. Posts/updates a single comment
+        # per issue (identified by *OpenHands Automation Complete* marker).
+        if record.jira_issue_key:
             await self._post_jira_token_usage(
                 conversation_id=conversation_id,
                 jira_issue_key=record.jira_issue_key,
@@ -140,7 +138,9 @@ class AutomationEventCallbackProcessor(EventCallbackProcessor):
         from openhands.app_server.config import (
             get_app_conversation_info_service,
         )
-        from openhands.app_server.utils.jira import add_comment
+        from openhands.app_server.utils.jira import (
+            add_or_update_token_usage_comment,
+        )
 
         try:
             # Build a minimal DI state for services that don't need auth
@@ -178,19 +178,19 @@ class AutomationEventCallbackProcessor(EventCallbackProcessor):
                 f'*Model:* {metrics.model_name}',
             ]
 
-            total_tokens = 0
             if token_usage:
-                total_tokens = (
-                    token_usage.prompt_tokens
-                    + token_usage.completion_tokens
-                )
                 lines.append('')
                 lines.append('*Token Usage:*')
-                lines.append(f'- Prompt tokens: {token_usage.prompt_tokens:,}')
+                lines.append(
+                    f'- Prompt tokens: {token_usage.prompt_tokens:,}'
+                )
                 lines.append(
                     f'- Completion tokens: {token_usage.completion_tokens:,}'
                 )
-                lines.append(f'- Total tokens: {total_tokens:,}')
+                lines.append(
+                    f'- Total tokens: '
+                    f'{token_usage.prompt_tokens + token_usage.completion_tokens:,}'
+                )
                 if token_usage.cache_read_tokens:
                     lines.append(
                         f'- Cache read tokens: {token_usage.cache_read_tokens:,}'
@@ -213,10 +213,12 @@ class AutomationEventCallbackProcessor(EventCallbackProcessor):
                 )
 
             comment_body = '\n'.join(lines)
-            result = add_comment(jira_issue_key, comment_body)
+            result = add_or_update_token_usage_comment(
+                jira_issue_key, comment_body
+            )
             logger.info(
-                f'[Automation] Posted token usage comment to {jira_issue_key} '
-                f'(comment id: {result.get("id", "unknown")})',
+                f'[Automation] {"Updated" if result.get("id") else "Posted"} '
+                f'token usage comment on {jira_issue_key}',
                 extra=build_log_context(
                     execution_id=execution_id,
                     conversation_id=str(conversation_id),
