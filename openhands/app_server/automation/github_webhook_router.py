@@ -274,17 +274,33 @@ async def _process_github_review_submitted(
         )
         return
 
+    # Extract the PR html_url for conversation lookup
+    pr_url = pr_data.get('html_url', '')
+    if not pr_url:
+        logger.info(
+            f'[Automation] PR html_url not found for PR #{pr_number}, '
+            'falling through to new conversation creation'
+        )
+        await _run_github_background(
+            'review_submitted',
+            'process_review_submitted',
+            payload,
+            delivery_id,
+            request,
+        )
+        return
+
     logger.info(
         f'[Automation] Checking for existing conversation for '
-        f'{full_name} PR #{pr_number}'
+        f'{full_name} PR #{pr_number} ({pr_url})'
     )
 
-    # Look up existing conversation by PR number
+    # Look up existing conversation by PR URL (stored in github_pr column)
     async with get_app_conversation_info_service(
         request.state, request
     ) as info_service:
-        conversation = await info_service.get_conversation_by_pr_number(
-            pr_number
+        conversation = await info_service.get_conversation_by_pr_url(
+            pr_url
         )
 
     if not conversation:
