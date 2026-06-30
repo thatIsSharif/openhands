@@ -20,9 +20,9 @@ import base62
 import httpx
 import psutil
 from fastapi import Request
+from openhands.agent_server.utils import utc_now
 from pydantic import BaseModel, ConfigDict, Field
 
-from openhands.agent_server.utils import utc_now
 from openhands.app_server.errors import SandboxError
 from openhands.app_server.sandbox.sandbox_models import (
     AGENT_SERVER,
@@ -420,6 +420,22 @@ class ProcessSandboxService(SandboxService):
             if sandbox_id in _processes:
                 del _processes[sandbox_id]
             return True
+
+    async def snapshot_sandbox(self, sandbox_id: str) -> str | None:
+        """Snapshot not supported for process sandboxes."""
+        _logger.debug(
+            f'Snapshot not supported for process sandbox {sandbox_id}'
+        )
+        return None
+
+    async def restore_from_snapshot(
+        self, snapshot_name: str, sandbox_id: str
+    ) -> SandboxInfo | None:
+        """Restore not supported for process sandboxes."""
+        _logger.debug(
+            f'Restore from snapshot not supported for process sandbox {sandbox_id}'
+        )
+        return None
 
 
 class ProcessSandboxServiceInjector(SandboxServiceInjector):
