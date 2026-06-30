@@ -460,15 +460,22 @@ async def post_jira_comment(
                     )
                 )
                 if conversation:
-                    conversation.github_pr = pr_urls
-                    await info_service.save_app_conversation_info(conversation)
-                    logger.info(
-                        '[Automation] Updated conversation %s github_pr '
-                        'with %d PR(s) for Jira issue %s',
-                        conversation.id,
-                        len(pr_urls),
-                        req.issue_key,
-                    )
+                    # Merge with existing PRs, deduplicating while preserving order
+                    seen = set(conversation.github_pr)
+                    new_prs = [url for url in pr_urls if url not in seen]
+                    if new_prs:
+                        conversation.github_pr = conversation.github_pr + new_prs
+                        await info_service.save_app_conversation_info(
+                            conversation
+                        )
+                        logger.info(
+                            '[Automation] Updated conversation %s github_pr: '
+                            'added %d new PR(s) (total %d) for Jira issue %s',
+                            conversation.id,
+                            len(new_prs),
+                            len(conversation.github_pr),
+                            req.issue_key,
+                        )
         except Exception:
             import traceback
 
