@@ -255,11 +255,24 @@ async def _handle_comment_created(
                 agent_server_url
             )
 
-            # Build the message: include both the comment body and
-            # the Jira issue reference
+            # Build the token-usage endpoint from the request
+            base_url = str(request.base_url).rstrip('/')
+            token_usage_url = (
+                f'{base_url}/api/v1/jira/start/token-usage'
+            )
+
+            # Build the message: include the comment body, issue reference,
+            # and instruction to post token usage when done
             message_text = (
                 f'**[Jira comment on {issue_key}]**\n\n'
-                f'{comment_body}'
+                f'{comment_body}\n\n'
+                f'---\n'
+                f'When you finish addressing this, post token usage metrics '
+                f'by sending a POST request to:\n'
+                f'POST {token_usage_url}\n'
+                f'{{"issue_key": "{issue_key}", "body": ""}}\n'
+                f'(Uses X-Session-API-Key auth. Creates or updates a single '
+                f'token-usage comment per issue.)'
             )
 
             response = await httpx_client.post(
