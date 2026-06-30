@@ -29,10 +29,17 @@ def _format_ts(ts: str | None) -> str:
 
 
 def _text_to_adf(body: str) -> dict:
-    """Convert plain text to Atlassian Document Format."""
-    lines = body.strip().split('\n')
+    """Convert plain text to Atlassian Document Format.
+
+    Blank lines are collapsed instead of being turned into their own
+    empty paragraph nodes, which is what was causing the oversized gaps
+    between lines when rendered in Jira.
+    """
+    lines = [line for line in body.strip().split('\n')]
     content = []
     for line in lines:
+        if not line.strip():
+            continue
         content.append({
             'type': 'paragraph',
             'content': [
@@ -42,7 +49,7 @@ def _text_to_adf(body: str) -> dict:
     return {
         'type': 'doc',
         'version': 1,
-        'content': content,
+        'content': content or [{'type': 'paragraph', 'content': []}],
     }
 
 
@@ -78,13 +85,14 @@ def _auth_headers(email: str, api_key: str) -> dict:
     }
 
 
-def add_comment(issue_key: str, body: str) -> dict:
+def add_comment(issue_key: str, body) -> dict:
     """
     Post a comment to a Jira issue.
 
     Args:
         issue_key: Jira issue key (e.g. "KAN-23").
-        body: Comment text (plain text, converted to ADF automatically).
+        body: Comment text (plain text, converted to ADF automatically),
+            OR a pre-built ADF dict (e.g. from build_token_usage_comment).
 
     Returns:
         Response dict with at least 'id' key.
@@ -95,7 +103,8 @@ def add_comment(issue_key: str, body: str) -> dict:
     """
     email, api_key, domain = _get_auth()
     url = f'https://{domain}/rest/api/3/issue/{issue_key}/comment'
-    payload = json.dumps({'body': _text_to_adf(body)}).encode('utf-8')
+    adf_body = body if isinstance(body, dict) else _text_to_adf(body)
+    payload = json.dumps({'body': adf_body}).encode('utf-8')
 
     req = urllib.request.Request(
         url, data=payload, headers=_auth_headers(email, api_key),
@@ -142,13 +151,14 @@ def get_comments(issue_key: str) -> list[dict]:
         raise RuntimeError(f'Jira connection error: {e.reason}') from e
 
 
-def update_comment(issue_key: str, comment_id: str, body: str) -> dict:
+def update_comment(issue_key: str, comment_id: str, body) -> dict:
     """Update an existing comment on a Jira issue.
 
     Args:
         issue_key: Jira issue key (e.g. "KAN-23").
         comment_id: The ID of the comment to update.
-        body: New comment text (plain text, converted to ADF automatically).
+        body: New comment text (plain text, converted to ADF automatically),
+            OR a pre-built ADF dict.
 
     Returns:
         Response dict from the Jira API.
@@ -161,7 +171,8 @@ def update_comment(issue_key: str, comment_id: str, body: str) -> dict:
     url = (
         f'https://{domain}/rest/api/3/issue/{issue_key}/comment/{comment_id}'
     )
-    payload = json.dumps({'body': _text_to_adf(body)}).encode('utf-8')
+    adf_body = body if isinstance(body, dict) else _text_to_adf(body)
+    payload = json.dumps({'body': adf_body}).encode('utf-8')
 
     req = urllib.request.Request(
         url, data=payload, headers=_auth_headers(email, api_key),
@@ -179,10 +190,10 @@ def update_comment(issue_key: str, comment_id: str, body: str) -> dict:
         raise RuntimeError(f'Jira connection error: {e.reason}') from e
 
 
-TOKEN_USAGE_MARKER = '*OpenHands Automation Complete*'
+TOKEN_USAGE_MARKER = 'OpenHands Automation Complete'
 
 
-def add_or_update_token_usage_comment(issue_key: str, body: str) -> dict:
+def add_or_update_token_usage_comment(issue_key: str, body) -> dict:
     """Post or update a token-usage comment on a Jira issue.
 
     Searches existing comments for one containing TOKEN_USAGE_MARKER.
@@ -190,7 +201,8 @@ def add_or_update_token_usage_comment(issue_key: str, body: str) -> dict:
 
     Args:
         issue_key: Jira issue key (e.g. "KAN-23").
-        body: Comment text (plain text, converted to ADF automatically).
+        body: Comment text (plain text) or a pre-built ADF dict, as
+            returned by build_token_usage_comment().
 
     Returns:
         Response dict from the Jira API, with at least 'id' key.
@@ -289,6 +301,30 @@ async def fetch_live_agent_metrics(
         return {}
 
 
+def _text(value: str, *, bold: bool = False, color: str | None = None) -> dict:
+    """Build an ADF text node, optionally bold and/or colored."""
+    marks = []
+    if bold:
+        marks.append({'type': 'strong'})
+    if color:
+        marks.append({'type': 'textColor', 'attrs': {'color': color}})
+    node: dict = {'type': 'text', 'text': value}
+    if marks:
+        node['marks'] = marks
+    return node
+
+
+def _stat_paragraph(label: str, value: str, *, value_color: str | None = None) -> dict:
+    """A single 'Label: Value' line with the label muted and value emphasized."""
+    return {
+        'type': 'paragraph',
+        'content': [
+            _text(f'{label}: ', color='#6B778C'),
+            _text(value, bold=True, color=value_color),
+        ],
+    }
+
+
 def build_token_usage_comment(
     accumulated_cost: float = 0.0,
     model_name: str = 'default',
@@ -300,53 +336,106 @@ def build_token_usage_comment(
     max_budget: float | None = None,
     created_at: str | None = None,
     updated_at: str | None = None,
-) -> str:
-    """Build a beautified token-usage comment for a Jira issue.
+) -> dict:
+    """Build a token-usage comment for a Jira issue as a native ADF document.
 
-    Includes emojis, formatted token counts, cost, timestamps,
-    and budget usage.
+    Uses real ADF nodes (heading, panel, bullet list, rule) instead of
+    plain-text lines, so the comment renders as a clean, well-spaced card
+    in Jira rather than a stack of loosely separated lines.
+
+    Returns:
+        An ADF document dict, ready to pass straight to add_comment(),
+        update_comment(), or add_or_update_token_usage_comment().
     """
-    lines = [
-        '🎯 *OpenHands Automation Complete*',
-        '',
-        f'💰 *Total Cost:* ${accumulated_cost:.6f}',
-        f'🤖 *Model:* {model_name}',
-    ]
+    content: list[dict] = []
 
+    # Header
+    content.append({
+        'type': 'heading',
+        'attrs': {'level': 3},
+        'content': [
+            {'type': 'emoji', 'attrs': {'shortName': ':dart:', 'text': '🎯'}},
+            _text(f'  {TOKEN_USAGE_MARKER}', bold=True),
+        ],
+    })
+
+    # Cost + model summary line
     total_tokens = prompt_tokens + completion_tokens
-    if total_tokens > 0 or prompt_tokens > 0 or completion_tokens > 0:
-        lines.append('')
-        lines.append('📊 *Token Usage:*')
-        lines.append(f'   • Prompt tokens:     {prompt_tokens:>10,}')
-        lines.append(f'   • Completion tokens: {completion_tokens:>10,}')
-        lines.append(f'   • Total tokens:      {total_tokens:>10,}')
-        if cache_read_tokens:
-            lines.append(
-                f'   • Cache read tokens:  {cache_read_tokens:>10,} 💾'
-            )
-        if cache_write_tokens:
-            lines.append(
-                f'   • Cache write tokens: {cache_write_tokens:>10,} 💾'
-            )
-        if reasoning_tokens:
-            lines.append(
-                f'   • Reasoning tokens:   {reasoning_tokens:>10,} 🧠'
-            )
+    summary_content = [
+        _text('💰 Cost  '),
+        _text(f'${accumulated_cost:.6f}', bold=True),
+        _text('     🤖 Model  '),
+        _text(model_name, bold=True),
+    ]
+    content.append({'type': 'paragraph', 'content': summary_content})
 
+    content.append({'type': 'rule'})
+
+    # Token usage section
+    if total_tokens > 0 or prompt_tokens > 0 or completion_tokens > 0:
+        content.append({
+            'type': 'paragraph',
+            'content': [_text('📊 Token Usage', bold=True)],
+        })
+
+        bullet_items = [
+            ('Prompt tokens', f'{prompt_tokens:,}'),
+            ('Completion tokens', f'{completion_tokens:,}'),
+            ('Total tokens', f'{total_tokens:,}'),
+        ]
+        if cache_read_tokens:
+            bullet_items.append(('Cache read tokens', f'{cache_read_tokens:,}'))
+        if cache_write_tokens:
+            bullet_items.append(('Cache write tokens', f'{cache_write_tokens:,}'))
+        if reasoning_tokens:
+            bullet_items.append(('Reasoning tokens', f'{reasoning_tokens:,}'))
+
+        content.append({
+            'type': 'bulletList',
+            'content': [
+                {
+                    'type': 'listItem',
+                    'content': [
+                        {
+                            'type': 'paragraph',
+                            'content': [
+                                _text(f'{label}: ', color='#6B778C'),
+                                _text(value, bold=True),
+                            ],
+                        }
+                    ],
+                }
+                for label, value in bullet_items
+            ],
+        })
+
+    # Budget usage
     if max_budget and max_budget > 0:
         pct = accumulated_cost / max_budget * 100
-        lines.append('')
-        lines.append(
-            f'📋 *Budget Usage:* ${accumulated_cost:.4f}'
-            f' / ${max_budget:.4f} ({pct:.1f}%)'
+        budget_color = '#DE350B' if pct >= 90 else (
+            '#FF8B00' if pct >= 70 else '#00875A'
         )
+        content.append({'type': 'rule'})
+        content.append(_stat_paragraph(
+            '📋 Budget Usage',
+            f'${accumulated_cost:.4f} / ${max_budget:.4f}  ({pct:.1f}%)',
+            value_color=budget_color,
+        ))
 
-    lines.append('')
-    lines.append(
-        f'⏱️ *Created:* {_format_ts(created_at)}'
-    )
-    lines.append(
-        f'⏱️ *Updated:* {_format_ts(updated_at)}'
-    )
+    # Timestamps
+    content.append({'type': 'rule'})
+    content.append({
+        'type': 'paragraph',
+        'content': [
+            _text('⏱️ Created  ', color='#6B778C'),
+            _text(_format_ts(created_at), bold=True),
+            _text('     ⏱️ Updated  ', color='#6B778C'),
+            _text(_format_ts(updated_at), bold=True),
+        ],
+    })
 
-    return '\n'.join(lines)
+    return {
+        'type': 'doc',
+        'version': 1,
+        'content': content,
+    }
