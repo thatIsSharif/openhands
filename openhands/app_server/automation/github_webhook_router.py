@@ -462,11 +462,52 @@ async def _process_github_review_submitted(
 
 
 @router.post('/comment')
-async def post_github_pr_comment(req: GitHubCommentRequest) -> dict:
-    """Post a comment on a GitHub PR.
+async def post_github_pr_comment(
+    req: GitHubCommentRequest,
+    request: Request,
+) -> dict:
+    """Post a comment on a GitHub PR and pause the sandbox.
 
     LLM calls this to post review follow-up comments to the PR.
-    The function handles the GitHub API call.
+    The function handles the GitHub API call and pauses the
+    sandbox after task completion.
     """
     result = add_pr_comment(req.repository, req.pr_number, req.body)
-    return {'status': 'ok', 'comment_id': result['id']}
+    comment_id = result.get('id', '')
+
+    # Pause sandbox after task completion
+    try:
+        pr_url = f'https://github.com/{req.repository}/pull/{req.pr_number}'
+        from openhands.app_server.config import (
+            get_app_conversation_info_service,
+        )
+        from openhands.app_server.services.injector import InjectorState
+        from openhands.app_server.user.specifiy_user_context import (
+            ADMIN,
+            USER_CONTEXT_ATTR,
+        )
+
+        state = InjectorState()
+        setattr(state, USER_CONTEXT_ATTR, ADMIN)
+        async with get_app_conversation_info_service(
+            state, request
+        ) as info_service:
+            conversation = await info_service.get_conversation_by_pr_url(
+                pr_url
+            )
+
+        if conversation and conversation.sandbox_id:
+            from openhands.app_server.utils.sandbox_utils import pause_sandbox
+
+            await pause_sandbox(conversation.sandbox_id, state, request)
+    except Exception:
+        import traceback
+
+        logger.error(
+            '[Automation] Failed to pause sandbox for PR %s #%d: %s',
+            req.repository,
+            req.pr_number,
+            traceback.format_exc(),
+        )
+
+    return {'status': 'ok', 'comment_id': comment_id}

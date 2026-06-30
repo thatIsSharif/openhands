@@ -476,6 +476,26 @@ async def post_jira_comment(
                             len(conversation.github_pr),
                             req.issue_key,
                         )
+
+                    # Pause sandbox after task completion
+                    if conversation.sandbox_id:
+                        try:
+                            from openhands.app_server.utils.sandbox_utils import (
+                                pause_sandbox,
+                            )
+
+                            await pause_sandbox(
+                                conversation.sandbox_id, state, request
+                            )
+                        except Exception:
+                            import traceback
+
+                            logger.error(
+                                '[Automation] Failed to pause sandbox '
+                                'for Jira issue %s: %s',
+                                req.issue_key,
+                                traceback.format_exc(),
+                            )
         except Exception:
             import traceback
 
@@ -590,4 +610,20 @@ async def post_jira_token_usage(
     logger.info(
         f'[Automation] Token usage comment posted/updated on {req.issue_key}'
     )
+
+    # Pause sandbox after task completion
+    if sandbox and sandbox.id:
+        try:
+            from openhands.app_server.utils.sandbox_utils import pause_sandbox
+
+            await pause_sandbox(sandbox.id, state, request)
+        except Exception:
+            import traceback
+
+            logger.error(
+                '[Automation] Failed to pause sandbox for Jira issue %s: %s',
+                req.issue_key,
+                traceback.format_exc(),
+            )
+
     return {'status': 'ok', 'comment_id': result.get('id', '')}
