@@ -342,9 +342,11 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
             # This must happen BEFORE model_dump() so the analyzer is baked into
             # the initial POST /api/conversations request, active from step one.
             # IMPORTANT: Only SDK-native analyzer types can be used here, because
-            # the agent server (sandbox) only knows about SDK types. We merge the
-            # app-server automation patterns into the SDK's PatternSecurityAnalyzer
-            # via its constructor to avoid deserialization failures.
+            # the agent server (sandbox) only knows about SDK types.
+            # DEFAULT_HIGH_PATTERNS etc. are NOT exported from the SDK, so we use
+            # TWO PatternSecurityAnalyzer instances: one with all SDK defaults (no
+            # custom args) and one with ONLY our automation-specific patterns. The
+            # EnsembleSecurityAnalyzer merges them by taking the highest risk.
             if request.security_analyzer == 'automation':
                 from openhands.app_server.automation.automation_security_analyzer import (
                     AUTOMATION_GIT_PATTERNS,
@@ -353,10 +355,6 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
                 )
                 from openhands.sdk.security import EnsembleSecurityAnalyzer
                 from openhands.sdk.security.defense_in_depth import (
-                    DEFAULT_HIGH_PATTERNS,
-                    DEFAULT_INJECTION_HIGH_PATTERNS,
-                    DEFAULT_INJECTION_MEDIUM_PATTERNS,
-                    DEFAULT_MEDIUM_PATTERNS,
                     PatternSecurityAnalyzer,
                     PolicyRailSecurityAnalyzer,
                 )
@@ -365,16 +363,15 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
                     EnsembleSecurityAnalyzer(
                         analyzers=[
                             PolicyRailSecurityAnalyzer(),
+                            # SDK defaults only (rm -rf, curl|sh, eval, etc.)
+                            PatternSecurityAnalyzer(),
+                            # Automation-specific patterns only
                             PatternSecurityAnalyzer(
                                 high_patterns=(
-                                    DEFAULT_HIGH_PATTERNS
-                                    + AUTOMATION_HIGH_PATTERNS
+                                    AUTOMATION_HIGH_PATTERNS
                                     + AUTOMATION_GIT_PATTERNS
                                     + AUTOMATION_GITHUB_PATTERNS
                                 ),
-                                medium_patterns=DEFAULT_MEDIUM_PATTERNS,
-                                injection_high_patterns=DEFAULT_INJECTION_HIGH_PATTERNS,
-                                injection_medium_patterns=DEFAULT_INJECTION_MEDIUM_PATTERNS,
                             ),
                         ]
                     )
