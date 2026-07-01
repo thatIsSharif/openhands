@@ -89,6 +89,9 @@ class OpenHandsClient:
             max_budget_per_task=max_budget,
             # Layer 2: Security analyzer active from first agent step
             security_analyzer='automation',
+            # For automation, enable confirmation mode so that security
+            # analyzers can block risky actions via the confirmation policy.
+            confirmation_mode=True,
             processors=processors,
             jira_issue_key=jira_issue_key,
         )
@@ -141,12 +144,13 @@ class OpenHandsClient:
                     ),
                 )
 
-                # Apply AutomationSecurityAnalyzer as a follow-up.
+                # Re-register security analyzer as a follow-up.
                 # SDK-native analyzers (PatternSecurityAnalyzer,
                 # PolicyRailSecurityAnalyzer) are already active from the initial
-                # POST /api/conversations. This adds the app-server-only
-                # AutomationSecurityAnalyzer (destructive commands, prod access,
-                # dangerous git ops) via a separate POST.
+                # POST /api/conversations. This replaces the conversation's analyzer
+                # with a new Ensemble that includes the automation-specific patterns
+                # (destructive commands, prod access, dangerous git ops), ensuring
+                # they are active even if the initial POST missed them.
                 await self._add_automation_security_analyzer(
                     state=state,
                     request=request,
@@ -171,13 +175,16 @@ class OpenHandsClient:
         execution_id: str | None = None,
         jira_issue_key: str | None = None,
     ) -> None:
-        """Register AutomationSecurityAnalyzer on a running conversation.
+        """Re-register the security analyzer on a running conversation.
 
         SDK-native analyzers (PatternSecurityAnalyzer, PolicyRailSecurityAnalyzer)
         are already baked into the initial POST /api/conversations. This method
-        adds the app-server-only AutomationSecurityAnalyzer as a follow-up by
-        replacing the conversation's security analyzer with a new Ensemble that
-        includes all three.
+        replaces the conversation's analyzer with a new Ensemble that includes
+        the automation-specific patterns via PatternSecurityAnalyzer, ensuring
+        they are active even if the initial POST missed them.
+
+        Uses only SDK-native types so the agent server can deserialize the
+        payload correctly — app-server-only analyzer classes are avoided.
 
         Failures are logged but do not break conversation execution.
         """
@@ -240,9 +247,14 @@ class OpenHandsClient:
                     )
                     return
 
-            # Build the full ensemble: SDK-native analyzers + AutomationSecurityAnalyzer
+            # Build the full ensemble using only SDK-native types.
+            # The AutomationSecurityAnalyzer (app-server-only class) would not
+            # deserialize on the agent server, so we use PatternSecurityAnalyzer
+            # with the exported automation-specific pattern tuples instead.
             from openhands.app_server.automation.automation_security_analyzer import (
-                AutomationSecurityAnalyzer,
+                AUTOMATION_GIT_PATTERNS,
+                AUTOMATION_GITHUB_PATTERNS,
+                AUTOMATION_HIGH_PATTERNS,
             )
             from openhands.sdk.security import EnsembleSecurityAnalyzer
             from openhands.sdk.security.defense_in_depth import (
@@ -253,12 +265,20 @@ class OpenHandsClient:
             security_analyzer = EnsembleSecurityAnalyzer(
                 analyzers=[
                     PolicyRailSecurityAnalyzer(),
+                    # SDK defaults only (rm -rf, curl|sh, eval, etc.)
                     PatternSecurityAnalyzer(),
-                    AutomationSecurityAnalyzer(),
+                    # Automation-specific patterns only
+                    PatternSecurityAnalyzer(
+                        high_patterns=(
+                            AUTOMATION_HIGH_PATTERNS
+                            + AUTOMATION_GIT_PATTERNS
+                            + AUTOMATION_GITHUB_PATTERNS
+                        ),
+                    ),
                 ]
             )
 
-            # Register on the agent server (replaces the initial 2-analyzer ensemble)
+            # Register on the agent server (replaces the initial analyzer)
             async with get_httpx_client(state, request) as httpx_client:
                 payload = {'security_analyzer': security_analyzer.model_dump()}
                 response = await httpx_client.post(

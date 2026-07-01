@@ -383,6 +383,18 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
                 if analyzer is not None:
                     start_conversation_request.security_analyzer = analyzer
 
+            # Apply task-level confirmation_mode override (for automation conversations).
+            # This enables the confirmation policy to deny risky actions.
+            # Note: StartConversationRequest only has confirmation_policy, not
+            # confirmation_mode — the policy is what the agent server evaluates
+            # at runtime, so we override it directly here.
+            if request.confirmation_mode is not None:
+                from openhands.sdk.security import ConfirmRisky
+
+                start_conversation_request.confirmation_policy = (
+                    ConfirmRisky()
+                )
+
             # update status
             task.status = AppConversationStartTaskStatus.STARTING_CONVERSATION
             task.agent_server_url = agent_server_url
