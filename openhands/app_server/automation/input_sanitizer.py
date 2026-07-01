@@ -43,6 +43,92 @@ def validate_github_pr_number(number: int) -> bool:
 # ---------------------------------------------------------------------------
 
 _INJECTION_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    # ── Dangerous embedded commands ──────────────────────────────
+    # git push --force variants (direct push to main with force)
+    (
+        re.compile(
+            r'\bgit\s+push\s+.*?(?:--force|-f|main|master).*?(?:--force|-f)?\b',
+            re.IGNORECASE,
+        ),
+        'dangerous_git_push',
+    ),
+    # git push origin HEAD:main (direct branch override)
+    (
+        re.compile(
+            r'\bgit\s+push\s+origin\s+HEAD\s*:\s*(?:main|master)\b',
+            re.IGNORECASE,
+        ),
+        'dangerous_git_push_direct',
+    ),
+    # git checkout main/master (then destructive operations)
+    (
+        re.compile(
+            r'\bgit\s+checkout\s+(?:main|master)\b',
+            re.IGNORECASE,
+        ),
+        'dangerous_git_checkout_main',
+    ),
+    # git commit -a / git commit directly to main
+    (
+        re.compile(
+            r'\bgit\s+commit\b.*?(?:main|master)',
+            re.IGNORECASE,
+        ),
+        'dangerous_git_commit_main',
+    ),
+    # git reset --hard
+    (
+        re.compile(r'\bgit\s+reset\s+--hard\b', re.IGNORECASE),
+        'dangerous_git_reset_hard',
+    ),
+    # git merge main/master
+    (
+        re.compile(r'\bgit\s+merge\s+(?:main|master)\b', re.IGNORECASE),
+        'dangerous_git_merge_main',
+    ),
+    # rm -rf on root or system dirs
+    (
+        re.compile(
+            r'\brm\s+(?:-[rf]+\s+|\s+).*?(?:\/|\.\s+|\.$|\/etc|\/usr|\/var|\/home|\/root|\/opt)',
+            re.IGNORECASE,
+        ),
+        'dangerous_rm_rf',
+    ),
+    # DROP DATABASE / TABLE
+    (
+        re.compile(r'\bDROP\s+(?:DATABASE|TABLE|SCHEMA)\b', re.IGNORECASE),
+        'dangerous_drop_db',
+    ),
+    # DELETE FROM without WHERE
+    (
+        re.compile(r'\bDELETE\s+FROM\b(?!.*\bWHERE\b)', re.IGNORECASE),
+        'dangerous_delete_no_where',
+    ),
+    # TRUNCATE
+    (
+        re.compile(r'\bTRUNCATE\b', re.IGNORECASE),
+        'dangerous_truncate',
+    ),
+    # mkfs / dd (disk operations)
+    (
+        re.compile(r'\bmkfs\b', re.IGNORECASE),
+        'dangerous_mkfs',
+    ),
+    (
+        re.compile(r'\bdd\b.{0,50}(?:of=|if=)', re.IGNORECASE),
+        'dangerous_dd',
+    ),
+    # chmod -R 000 (remove all permissions)
+    (
+        re.compile(r'\bchmod\s+-R\s+0{3,4}\b', re.IGNORECASE),
+        'dangerous_chmod',
+    ),
+    # find / -delete (mass deletion)
+    (
+        re.compile(r'\bfind\s+/\s+-type\s+[fd]\s+-delete\b', re.IGNORECASE),
+        'dangerous_find_delete',
+    ),
+    # ── Original injection patterns ─────────────────────────────
     # "Ignore all previous instructions" and variants
     (
         re.compile(

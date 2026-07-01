@@ -338,6 +338,16 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
             if request.max_iterations is not None:
                 start_conversation_request.max_iterations = request.max_iterations
 
+            # Apply task-level security_analyzer override (for automation conversations).
+            # This must happen BEFORE model_dump() so the analyzer is baked into
+            # the initial POST /api/conversations request, active from step one.
+            if request.security_analyzer is not None:
+                analyzer = self._create_security_analyzer_from_string(
+                    request.security_analyzer
+                )
+                if analyzer is not None:
+                    start_conversation_request.security_analyzer = analyzer
+
             # update status
             task.status = AppConversationStartTaskStatus.STARTING_CONVERSATION
             task.agent_server_url = agent_server_url
