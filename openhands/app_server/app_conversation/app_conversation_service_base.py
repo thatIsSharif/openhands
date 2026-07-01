@@ -619,6 +619,7 @@ printf 'password=%s\\n' "$token"
         Args:
             security_analyzer_str: String value from settings. Valid values:
                 - "llm" -> LLMSecurityAnalyzer
+                - "automation" -> Ensemble of all security analyzers
                 - "none" or None -> None
                 - Other values -> None (unsupported analyzers are ignored)
 
@@ -631,10 +632,28 @@ printf 'password=%s\\n' "$token"
         if security_analyzer_str.lower() == 'llm':
             return LLMSecurityAnalyzer()
 
+        if security_analyzer_str.lower() == 'automation':
+            from openhands.app_server.automation.automation_security_analyzer import (
+                AutomationSecurityAnalyzer,
+            )
+            from openhands.sdk.security import EnsembleSecurityAnalyzer
+            from openhands.sdk.security.defense_in_depth import (
+                PatternSecurityAnalyzer,
+                PolicyRailSecurityAnalyzer,
+            )
+
+            return EnsembleSecurityAnalyzer(
+                analyzers=[
+                    PolicyRailSecurityAnalyzer(),
+                    PatternSecurityAnalyzer(),
+                    AutomationSecurityAnalyzer(),
+                ]
+            )
+
         # For unknown values, log a warning and return None
         _logger.warning(
             f'Unknown security analyzer value: {security_analyzer_str}. '
-            'Supported values: "llm", "none". Defaulting to None.'
+            'Supported values: "llm", "automation", "none". Defaulting to None.'
         )
         return None
 

@@ -22,6 +22,7 @@ from openhands.app_server.utils.logger import openhands_logger as logger
 from .correlation import build_log_context
 from .execution_models import ExecutionState, SourceType
 from .execution_service import ExecutionService
+from .input_sanitizer import sanitize_input, validate_jira_issue_key
 from .openhands_client import OpenHandsClient
 from .prompt_renderer import render_prompt
 
@@ -39,11 +40,9 @@ def verify_jira_signature(
     if not signature_header:
         return False
 
-
     parts = signature_header.split('=', 1)
     if len(parts) != 2 or parts[0] != 'sha256':
         return False
-
 
     expected = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
     return hmac.compare_digest(parts[1], expected)
@@ -84,9 +83,7 @@ def extract_jira_issue_data(
         'description': fields.get('description') or '',
         'issue_type': (fields.get('issuetype', {}) or {}).get('name', ''),
         'priority': (fields.get('priority', {}) or {}).get('name', ''),
-        'reporter': (
-            (fields.get('reporter', {}) or {}).get('displayName', '')
-        ),
+        'reporter': ((fields.get('reporter', {}) or {}).get('displayName', '')),
         'labels': fields.get('labels') or [],
         'project_key': project.get('key', ''),
     }
@@ -97,12 +94,7 @@ def extract_jira_project_key(payload: dict) -> str | None:
 
     The project key is nested in issue.fields.project.key.
     """
-    return (
-        payload.get('issue', {})
-        .get('fields', {})
-        .get('project', {})
-        .get('key')
-    )
+    return payload.get('issue', {}).get('fields', {}).get('project', {}).get('key')
 
 
 _JIRA_REPOSITORY_FIELDS = [
@@ -227,8 +219,7 @@ class JiraAutomationService:
 
         if not project_key:
             logger.error(
-                '[Automation] Jira webhook: missing project key in '
-                f'issue {issue_key}',
+                f'[Automation] Jira webhook: missing project key in issue {issue_key}',
                 extra=build_log_context(
                     execution_id='',
                     jira_issue_key=issue_key,
@@ -342,9 +333,7 @@ class JiraAutomationService:
         event_id = compute_jira_event_id(payload)
 
         # Generate branch name
-        branch = generate_jira_branch_name(
-            issue_key, issue_data['issue_type'], summary
-        )
+        branch = generate_jira_branch_name(issue_key, issue_data['issue_type'], summary)
 
         # Create execution record with primary repository info
         execution_record, is_new = await self.execution_service.create_execution(
@@ -375,16 +364,35 @@ class JiraAutomationService:
         comment_endpoint = f'{base_url}/api/v1/jira/start/comment'
         token_usage_endpoint = f'{base_url}/api/v1/jira/start/token-usage'
 
+        # ── Input sanitization (Layer 1) ────────────────────────────
+        # Sanitize all user-controlled text fields before template rendering
+        validated_issue_key = (
+            issue_key if validate_jira_issue_key(issue_key) else 'INVALID-KEY'
+        )
+        safe_summary = sanitize_input(summary, field_name='jira_summary')
+        safe_description = sanitize_input(
+            issue_data['description'], field_name='jira_description'
+        )
+        safe_issue_type = sanitize_input(
+            issue_data['issue_type'], field_name='jira_issue_type'
+        )
+        safe_priority = sanitize_input(
+            issue_data['priority'], field_name='jira_priority'
+        )
+        safe_reporter = sanitize_input(
+            issue_data['reporter'], field_name='jira_reporter'
+        )
+
         # Build prompt from template with full context
         # Include all other repos for potential cloning
         prompt = render_prompt(
             'jira_new_conversation.j2',
-            issue_key=issue_key,
-            title=summary,
-            issue_type=issue_data['issue_type'],
-            priority=issue_data['priority'],
-            reporter=issue_data['reporter'],
-            description=issue_data['description'],
+            issue_key=validated_issue_key,
+            title=safe_summary,
+            issue_type=safe_issue_type,
+            priority=safe_priority,
+            reporter=safe_reporter,
+            description=safe_description,
             repository=primary_repository,
             repo_label=primary_label,
             default_branch=default_branch,
@@ -419,7 +427,9 @@ class JiraAutomationService:
                 'conversation_id': conversation_id,
                 'issue_key': issue_key,
                 'repository': primary_repository,
-                'other_repos': [f'{r["owner"]}/{r["repository"]}' for r in other_repos_info],
+                'other_repos': [
+                    f'{r["owner"]}/{r["repository"]}' for r in other_repos_info
+                ],
             }
         else:
             await self.execution_service.transition_state(
