@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from uuid import UUID
 
 from fastapi import Request
 
@@ -21,9 +22,16 @@ from openhands.app_server.automation.callback_processors import (
 )
 from openhands.app_server.automation.execution_store import ExecutionStore
 from openhands.app_server.config import (
+    get_app_conversation_info_service,
     get_app_conversation_service,
+    get_httpx_client,
+    get_sandbox_service,
 )
 from openhands.app_server.integrations.service_types import ProviderType
+from openhands.app_server.sandbox.sandbox_models import AGENT_SERVER
+from openhands.app_server.utils.docker_utils import (
+    replace_localhost_hostname_for_docker,
+)
 from openhands.app_server.utils.logger import (
     openhands_logger as logger,
 )
@@ -133,6 +141,20 @@ class OpenHandsClient:
                     ),
                 )
 
+                # Apply AutomationSecurityAnalyzer as a follow-up.
+                # SDK-native analyzers (PatternSecurityAnalyzer,
+                # PolicyRailSecurityAnalyzer) are already active from the initial
+                # POST /api/conversations. This adds the app-server-only
+                # AutomationSecurityAnalyzer (destructive commands, prod access,
+                # dangerous git ops) via a separate POST.
+                await self._add_automation_security_analyzer(
+                    state=state,
+                    request=request,
+                    conversation_id=conversation_id,
+                    execution_id=execution_id,
+                    jira_issue_key=jira_issue_key,
+                )
+
                 return conversation_id
 
             except Exception:
@@ -140,3 +162,134 @@ class OpenHandsClient:
 
                 logger.error(traceback.format_exc())
                 return None
+
+    async def _add_automation_security_analyzer(
+        self,
+        state,
+        request: Request | None,
+        conversation_id: str,
+        execution_id: str | None = None,
+        jira_issue_key: str | None = None,
+    ) -> None:
+        """Register AutomationSecurityAnalyzer on a running conversation.
+
+        SDK-native analyzers (PatternSecurityAnalyzer, PolicyRailSecurityAnalyzer)
+        are already baked into the initial POST /api/conversations. This method
+        adds the app-server-only AutomationSecurityAnalyzer as a follow-up by
+        replacing the conversation's security analyzer with a new Ensemble that
+        includes all three.
+
+        Failures are logged but do not break conversation execution.
+        """
+        try:
+            # Get conversation info to find the sandbox
+            async with get_app_conversation_info_service(
+                state, request
+            ) as info_service:
+                conv_info = await info_service.get_app_conversation_info(
+                    UUID(conversation_id)
+                )
+                if not conv_info or not conv_info.sandbox_id:
+                    logger.warning(
+                        '[Security] Cannot add AutomationSecurityAnalyzer: '
+                        'conversation %s has no sandbox info',
+                        conversation_id,
+                        extra=build_log_context(
+                            execution_id=execution_id or '',
+                            conversation_id=conversation_id,
+                            jira_issue_key=jira_issue_key,
+                        ),
+                    )
+                    return
+
+            # Get sandbox details for agent server URL and session key
+            async with get_sandbox_service(state, request) as sandbox_service:
+                sandbox = await sandbox_service.get_sandbox(conv_info.sandbox_id)
+                if not sandbox or not sandbox.exposed_urls:
+                    logger.warning(
+                        '[Security] Cannot add AutomationSecurityAnalyzer: '
+                        'sandbox %s has no exposed URLs',
+                        conv_info.sandbox_id,
+                    )
+                    return
+
+                agent_server_url: str | None = None
+                for exposed_url in sandbox.exposed_urls:
+                    if exposed_url.name == AGENT_SERVER:
+                        agent_server_url = exposed_url.url
+                        break
+
+                if not agent_server_url:
+                    logger.warning(
+                        '[Security] Cannot add AutomationSecurityAnalyzer: '
+                        'no AGENT_SERVER URL in sandbox %s',
+                        conv_info.sandbox_id,
+                    )
+                    return
+
+                agent_server_url = replace_localhost_hostname_for_docker(
+                    agent_server_url
+                )
+
+                session_api_key = sandbox.session_api_key
+                if not session_api_key:
+                    logger.warning(
+                        '[Security] Cannot add AutomationSecurityAnalyzer: '
+                        'sandbox %s has no session API key',
+                        conv_info.sandbox_id,
+                    )
+                    return
+
+            # Build the full ensemble: SDK-native analyzers + AutomationSecurityAnalyzer
+            from openhands.app_server.automation.automation_security_analyzer import (
+                AutomationSecurityAnalyzer,
+            )
+            from openhands.sdk.security import EnsembleSecurityAnalyzer
+            from openhands.sdk.security.defense_in_depth import (
+                PatternSecurityAnalyzer,
+                PolicyRailSecurityAnalyzer,
+            )
+
+            security_analyzer = EnsembleSecurityAnalyzer(
+                analyzers=[
+                    PolicyRailSecurityAnalyzer(),
+                    PatternSecurityAnalyzer(),
+                    AutomationSecurityAnalyzer(),
+                ]
+            )
+
+            # Register on the agent server (replaces the initial 2-analyzer ensemble)
+            async with get_httpx_client(state, request) as httpx_client:
+                payload = {'security_analyzer': security_analyzer.model_dump()}
+                response = await httpx_client.post(
+                    f'{agent_server_url}/api/conversations/'
+                    f'{conversation_id}/security_analyzer',
+                    json=payload,
+                    headers={'X-Session-API-Key': session_api_key},
+                    timeout=30.0,
+                )
+                response.raise_for_status()
+
+            logger.info(
+                '[Security] AutomationSecurityAnalyzer added to conversation %s',
+                conversation_id,
+                extra=build_log_context(
+                    execution_id=execution_id or '',
+                    conversation_id=conversation_id,
+                    jira_issue_key=jira_issue_key,
+                ),
+            )
+
+        except Exception as e:
+            # Log but don't fail conversation execution
+            logger.warning(
+                '[Security] Failed to add AutomationSecurityAnalyzer for '
+                'conversation %s: %s',
+                conversation_id,
+                e,
+                extra=build_log_context(
+                    execution_id=execution_id or '',
+                    conversation_id=conversation_id,
+                    jira_issue_key=jira_issue_key,
+                ),
+            )

@@ -341,7 +341,45 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
             # Apply task-level security_analyzer override (for automation conversations).
             # This must happen BEFORE model_dump() so the analyzer is baked into
             # the initial POST /api/conversations request, active from step one.
-            if request.security_analyzer is not None:
+            # IMPORTANT: Only SDK-native analyzer types can be used here, because
+            # the agent server (sandbox) only knows about SDK types. We merge the
+            # app-server automation patterns into the SDK's PatternSecurityAnalyzer
+            # via its constructor to avoid deserialization failures.
+            if request.security_analyzer == 'automation':
+                from openhands.app_server.automation.automation_security_analyzer import (
+                    AUTOMATION_GIT_PATTERNS,
+                    AUTOMATION_GITHUB_PATTERNS,
+                    AUTOMATION_HIGH_PATTERNS,
+                )
+                from openhands.sdk.security import EnsembleSecurityAnalyzer
+                from openhands.sdk.security.defense_in_depth import (
+                    DEFAULT_HIGH_PATTERNS,
+                    DEFAULT_INJECTION_HIGH_PATTERNS,
+                    DEFAULT_INJECTION_MEDIUM_PATTERNS,
+                    DEFAULT_MEDIUM_PATTERNS,
+                    PatternSecurityAnalyzer,
+                    PolicyRailSecurityAnalyzer,
+                )
+
+                start_conversation_request.security_analyzer = (
+                    EnsembleSecurityAnalyzer(
+                        analyzers=[
+                            PolicyRailSecurityAnalyzer(),
+                            PatternSecurityAnalyzer(
+                                high_patterns=(
+                                    DEFAULT_HIGH_PATTERNS
+                                    + AUTOMATION_HIGH_PATTERNS
+                                    + AUTOMATION_GIT_PATTERNS
+                                    + AUTOMATION_GITHUB_PATTERNS
+                                ),
+                                medium_patterns=DEFAULT_MEDIUM_PATTERNS,
+                                injection_high_patterns=DEFAULT_INJECTION_HIGH_PATTERNS,
+                                injection_medium_patterns=DEFAULT_INJECTION_MEDIUM_PATTERNS,
+                            ),
+                        ]
+                    )
+                )
+            elif request.security_analyzer is not None:
                 analyzer = self._create_security_analyzer_from_string(
                     request.security_analyzer
                 )

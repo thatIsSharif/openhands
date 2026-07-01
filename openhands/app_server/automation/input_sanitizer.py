@@ -25,11 +25,14 @@ logger = logging.getLogger(__name__)
 _JIRA_ISSUE_KEY_RE = re.compile(r'^[A-Z][A-Z0-9_]{1,49}-\d{1,10}$')
 
 
-def validate_jira_issue_key(key: str) -> bool:
+def validate_jira_issue_key(key: str | None) -> bool:
     """Validate a JIRA issue key format (e.g. PROJ-123).
 
     Must match: 2-50 uppercase letters/digits, hyphen, 1-10 digits.
+    Returns False for None or invalid format.
     """
+    if not isinstance(key, str):
+        return False
     return bool(_JIRA_ISSUE_KEY_RE.match(key))
 
 
@@ -43,6 +46,57 @@ def validate_github_pr_number(number: int) -> bool:
 # ---------------------------------------------------------------------------
 
 _INJECTION_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    # ── Role-play / jailbreak escapes ────────────────────────────
+    # "Pretend you are" / "Act as if" / "You are now" role-play
+    (
+        re.compile(
+            r'\b(?:pretend|act)\s+(?:that\s+)?(?:you\s+)?(?:are|as)\b',
+            re.IGNORECASE,
+        ),
+        'roleplay_escape',
+    ),
+    # "Developer mode" / "DAN" jailbreak
+    (
+        re.compile(
+            r'\b(?:developer\s+mode|(?:you\s+(?:are\s+)?)?DAN(?:iel)?)\b',
+            re.IGNORECASE,
+        ),
+        'jailbreak_dan',
+    ),
+    # "New conversation" / "New chat" / "fresh context" context reset
+    (
+        re.compile(
+            r'\b(?:new|fresh)\s+(?:conversation|chat|context|session)\b',
+            re.IGNORECASE,
+        ),
+        'context_reset_new',
+    ),
+    # "Forget the above" / "Disregard previous" / "Ignore everything above"
+    (
+        re.compile(
+            r'\b(?:forget|disregard|ignore|skip)\s+(?:the\s+)?'
+            r'(?:above|previous|everything\s+(?:above|before|so\s+far))\b',
+            re.IGNORECASE,
+        ),
+        'instruction_override_context',
+    ),
+    # "Step N: ..." multi-stage instruction attack
+    (
+        re.compile(
+            r'\b(?:step|phase|stage)\s+\d+\s*[:\-–—].{0,200}?\b'
+            r'(?:step|phase|stage)\s+\d+\s*[:\-–—]',
+            re.IGNORECASE | re.DOTALL,
+        ),
+        'multi_step_attack',
+    ),
+    # Base64-encoded payloads (40+ chars of base64)
+    (
+        re.compile(
+            r'(?:[A-Za-z0-9+/]{40,}(?:=|==)?)',
+            re.IGNORECASE,
+        ),
+        'base64_payload',
+    ),
     # ── Dangerous embedded commands ──────────────────────────────
     # git push --force variants (direct push to main with force)
     (

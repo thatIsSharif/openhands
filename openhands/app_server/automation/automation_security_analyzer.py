@@ -12,6 +12,28 @@ Detects:
 - Dangerous git operations
 - Dangerous GitHub API operations
 - Large-scale code deletion
+
+Usage::
+
+    from openhands.sdk.security import EnsembleSecurityAnalyzer
+    from openhands.sdk.security.defense_in_depth import (
+        PatternSecurityAnalyzer,
+        PolicyRailSecurityAnalyzer,
+    )
+    from openhands.app_server.automation.automation_security_analyzer import (
+        AUTOMATION_HIGH_PATTERNS,
+        AUTOMATION_GIT_PATTERNS,
+        AUTOMATION_GITHUB_PATTERNS,
+    )
+
+    analyzer = EnsembleSecurityAnalyzer(
+        analyzers=[
+            PolicyRailSecurityAnalyzer(),
+            PatternSecurityAnalyzer(
+                high_patterns=AUTOMATION_HIGH_PATTERNS,
+            ),
+        ]
+    )
 """
 
 from __future__ import annotations
@@ -177,7 +199,7 @@ HIGH_PROD_PATTERNS: list[tuple[re.Pattern[str], str, str]] = [
 HIGH_FS_PATTERNS: list[tuple[re.Pattern[str], str, str]] = [
     (
         re.compile(
-            r'\brm\s+-(?:[rR]|[fF])\s+.*?'
+            r'\brm\s+-(?:[rRfF]{1,3})\s+.*?'
             r'(?:/\s*$|/\s+\||/\w{0,20}\s+\||/etc|/usr|/var|/home|/root|/opt)',
             re.IGNORECASE,
         ),
@@ -262,6 +284,30 @@ HIGH_GITHUB_PATTERNS: list[tuple[re.Pattern[str], str, str]] = [
 # ---------------------------------------------------------------------------
 # AutomationSecurityAnalyzer
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# Re-export pattern tuples for use with PatternSecurityAnalyzer
+# (SDK-native PatternSecurityAnalyzer accepts these in its constructor).
+# Tuple format: (regex_pattern, description, detector_id)
+# ---------------------------------------------------------------------------
+
+AUTOMATION_HIGH_PATTERNS: list[tuple[str, str, str]] = [
+    (p.pattern, desc, det_id)
+    for p, desc, det_id in HIGH_DB_PATTERNS + HIGH_FS_PATTERNS + HIGH_PROD_PATTERNS
+]
+
+
+AUTOMATION_GIT_PATTERNS: list[tuple[str, str, str]] = [
+    (p.pattern, desc, det_id)
+    for p, desc, det_id in HIGH_GIT_PATTERNS
+]
+
+
+AUTOMATION_GITHUB_PATTERNS: list[tuple[str, str, str]] = [
+    (p.pattern, desc, det_id)
+    for p, desc, det_id in HIGH_GITHUB_PATTERNS
+]
 
 
 class AutomationSecurityAnalyzer(SecurityAnalyzerBase):
