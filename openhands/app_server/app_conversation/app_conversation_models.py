@@ -133,6 +133,9 @@ class AppConversationInfo(BaseModel):
     # Jira issue key for cross-referencing conversations with Jira issues
     jira_issue_key: str | None = None
 
+    # List of GitHub PR URLs created for the associated Jira issue
+    github_pr: list[str] = Field(default_factory=list)
+
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 

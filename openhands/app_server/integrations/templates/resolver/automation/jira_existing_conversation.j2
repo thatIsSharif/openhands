@@ -1,0 +1,9 @@
+**[Jira comment on {{ issue_key }}]**
+
+{{ comment_body }}
+
+---
+When you finish addressing this, post token usage metrics by sending a POST request to:
+POST {{ token_usage_url }}
+{"issue_key": "{{ issue_key }}", "body": ""}
+(Uses X-Session-API-Key auth. Creates or updates a single token-usage comment per issue.)

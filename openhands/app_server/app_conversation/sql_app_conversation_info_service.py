@@ -121,6 +121,11 @@ class StoredConversationMetadata(Base):
         String, nullable=True, index=True
     )
 
+    # List of GitHub PR URLs created for the associated Jira issue
+    github_pr: Mapped[list[str] | None] = mapped_column(
+        create_json_type_decorator(list[str]), nullable=True
+    )
+
 
 @dataclass
 class SQLAppConversationInfoService(AppConversationInfoService):
@@ -366,6 +371,26 @@ class SQLAppConversationInfoService(AppConversationInfoService):
             return self._to_info(result, sub_conversation_ids=sub_conversation_ids)
         return None
 
+    async def get_conversation_by_pr_url(
+        self, pr_url: str
+    ) -> AppConversationInfo | None:
+        """Look up a V1 conversation by its GitHub PR URL."""
+        query = await self._secure_select()
+        # Use SQLAlchemy JSON contains to find the PR URL in the JSON array.
+        # For PostgreSQL this uses the @> operator; for SQLite it falls back
+        # to text-based matching.
+        query = query.where(
+            StoredConversationMetadata.github_pr.contains([pr_url])
+        )
+        result_set = await self.db_session.execute(query)
+        result = result_set.scalar_one_or_none()
+        if result:
+            sub_conversation_ids = await self.get_sub_conversation_ids(
+                UUID(result.conversation_id)
+            )
+            return self._to_info(result, sub_conversation_ids=sub_conversation_ids)
+        return None
+
     async def save_app_conversation_info(
         self, info: AppConversationInfo
     ) -> AppConversationInfo:
@@ -404,6 +429,7 @@ class SQLAppConversationInfoService(AppConversationInfoService):
             public=info.public,
             tags=info.tags if info.tags else None,
             jira_issue_key=info.jira_issue_key,
+            github_pr=info.github_pr if info.github_pr else None,
         )
 
         await self.db_session.merge(stored)
@@ -594,6 +620,7 @@ class SQLAppConversationInfoService(AppConversationInfoService):
             public=stored.public,
             tags=stored.tags or {},
             jira_issue_key=stored.jira_issue_key,
+            github_pr=stored.github_pr or [],
             created_at=created_at,
             updated_at=updated_at,
         )

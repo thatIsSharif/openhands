@@ -16,13 +16,13 @@ Supports:
 from __future__ import annotations
 
 import os
+import re
+import traceback
 
 from fastapi import APIRouter, BackgroundTasks, Request
 from pydantic import BaseModel
 
 from openhands.agent_server.models import OpenHandsModel
-from openhands.app_server.services.injector import InjectorState
-from openhands.app_server.user.specifiy_user_context import ADMIN, USER_CONTEXT_ATTR
 from openhands.app_server.automation.execution_service import (
     ExecutionService,
 )
@@ -34,15 +34,19 @@ from openhands.app_server.automation.jira_automation_service import (
 from openhands.app_server.automation.openhands_client import (
     OpenHandsClient,
 )
+from openhands.app_server.automation.prompt_renderer import render_prompt
 from openhands.app_server.config import (
     get_app_conversation_info_service,
     get_httpx_client,
     get_sandbox_service,
 )
+from openhands.app_server.sandbox.sandbox_models import SandboxStatus
+from openhands.app_server.sandbox.session_auth import validate_session_key
+from openhands.app_server.services.injector import InjectorState
+from openhands.app_server.user.specifiy_user_context import ADMIN, USER_CONTEXT_ATTR
 from openhands.app_server.utils.docker_utils import (
     replace_localhost_hostname_for_docker,
 )
-
 from openhands.app_server.utils.jira import (
     _get_agent_url_from_sandbox,
     add_comment,
@@ -51,7 +55,7 @@ from openhands.app_server.utils.jira import (
     fetch_live_agent_metrics,
 )
 from openhands.app_server.utils.logger import openhands_logger as logger
-from openhands.app_server.sandbox.sandbox_models import SandboxStatus
+from openhands.app_server.utils.sandbox_utils import pause_sandbox
 
 
 class JiraCommentRequest(BaseModel):
@@ -132,12 +136,12 @@ async def _handle_comment_created(
 
     If the comment contains @openhands, looks up an existing conversation
     for the issue. If found, resumes the sandbox and forwards the comment
-    as a message. If not found, returns False so the caller can fall
-    through to the normal issue-creation flow.
+    as a message. If not found, creates a new conversation for the issue.
 
     Returns:
-        True if the comment was handled (conversation found and resumed),
-        False if no matching conversation exists.
+        True if the comment was handled (conversation found and resumed,
+        or new conversation created), False if the comment does not
+        mention @openhands.
     """
     issue = payload.get('issue', {})
     issue_key = issue.get('key')
@@ -173,9 +177,29 @@ async def _handle_comment_created(
     if not conversation:
         logger.info(
             f'[Automation] No existing conversation found for {issue_key}, '
-            'falling through to new conversation creation'
+            'creating a new conversation'
         )
-        return False
+        store = ExecutionStore()
+        execution_service = ExecutionService(store=store)
+        openhands_client = OpenHandsClient()
+
+        jira_service = JiraAutomationService(
+            execution_service=execution_service,
+            openhands_client=openhands_client,
+        )
+
+        result = await jira_service.process_issue_created(
+            payload=payload,
+            state=request.state,
+            request=request,
+        )
+
+        logger.info(
+            f'[Automation] New conversation created for {issue_key} '
+            f'via @openhands comment: {result.get("status")} '
+            f'(execution: {result.get("execution_id", "N/A")})'
+        )
+        return True
 
     conversation_id = conversation.id
     sandbox_id = conversation.sandbox_id
@@ -192,9 +216,30 @@ async def _handle_comment_created(
         if sandbox is None:
             logger.warning(
                 f'[Automation] Sandbox {sandbox_id} for conversation '
-                f'{conversation_id} not found'
+                f'{conversation_id} not found, creating new conversation'
             )
-            return False
+            store = ExecutionStore()
+            execution_service = ExecutionService(store=store)
+            openhands_client = OpenHandsClient()
+
+            jira_service = JiraAutomationService(
+                execution_service=execution_service,
+                openhands_client=openhands_client,
+            )
+
+            result = await jira_service.process_issue_created(
+                payload=payload,
+                state=request.state,
+                request=request,
+            )
+
+            logger.info(
+                f'[Automation] New conversation created for {issue_key} '
+                f'via @openhands comment (sandbox missing): '
+                f'{result.get("status")} '
+                f'(execution: {result.get("execution_id", "N/A")})'
+            )
+            return True
         if sandbox.status == SandboxStatus.PAUSED:
             logger.info(
                 f'[Automation] Resuming sandbox {sandbox_id} for '
@@ -214,7 +259,7 @@ async def _handle_comment_created(
                     f'[Automation] Sandbox {sandbox_id} did not become ready '
                     f'after 60 seconds'
                 )
-                return False
+                return True
 
             # Refresh sandbox info after resume
             sandbox = await sandbox_service.get_sandbox(sandbox_id)
@@ -222,9 +267,30 @@ async def _handle_comment_created(
         elif sandbox.status == SandboxStatus.MISSING:
             logger.warning(
                 f'[Automation] Sandbox {sandbox_id} for {issue_key} '
-                'is missing, cannot resume'
+                'is missing, cannot resume, creating new conversation'
             )
-            return False
+            store = ExecutionStore()
+            execution_service = ExecutionService(store=store)
+            openhands_client = OpenHandsClient()
+
+            jira_service = JiraAutomationService(
+                execution_service=execution_service,
+                openhands_client=openhands_client,
+            )
+
+            result = await jira_service.process_issue_created(
+                payload=payload,
+                state=request.state,
+                request=request,
+            )
+
+            logger.info(
+                f'[Automation] New conversation created for {issue_key} '
+                f'via @openhands comment (sandbox missing): '
+                f'{result.get("status")} '
+                f'(execution: {result.get("execution_id", "N/A")})'
+            )
+            return True
 
     # Send the comment as a message to the conversation
     async with get_httpx_client(
@@ -262,18 +328,12 @@ async def _handle_comment_created(
                 f'{base_url}/api/v1/jira/start/token-usage'
             )
 
-            # Build the message: include the comment body, issue reference,
-            # and instruction to post token usage when done
-            message_text = (
-                f'**[Jira comment on {issue_key}]**\n\n'
-                f'{comment_body}\n\n'
-                f'---\n'
-                f'When you finish addressing this, post token usage metrics '
-                f'by sending a POST request to:\n'
-                f'POST {token_usage_url}\n'
-                f'{{"issue_key": "{issue_key}", "body": ""}}\n'
-                f'(Uses X-Session-API-Key auth. Creates or updates a single '
-                f'token-usage comment per issue.)'
+            # Render the message from the existing-conversation template
+            message_text = render_prompt(
+                'jira_existing_conversation.j2',
+                issue_key=issue_key,
+                comment_body=comment_body,
+                token_usage_url=token_usage_url,
             )
 
             response = await httpx_client.post(
@@ -308,7 +368,6 @@ async def _handle_comment_created(
             )
 
         except Exception as e:
-            import traceback
             logger.error(
                 f'[Automation] Failed to send comment for {issue_key} '
                 f'to conversation {conversation_id}: {type(e).__name__}: {e}\n'
@@ -335,12 +394,6 @@ async def _process_jira_event(
                     f'{payload.get("issue", {}).get("key")} handled'
                 )
                 return
-            # If not handled (no existing conversation), fall through
-            # to create a new conversation via the assignment flow
-            logger.info(
-                '[Automation] Comment not handled by existing conversation, '
-                'falling through to issue assignment flow'
-            )
 
         # Read target account ID from environment (set JIRA_TARGET_ACCOUNT_ID)
         target_account_id = os.environ.get('JIRA_TARGET_ACCOUNT_ID', '')
@@ -414,16 +467,67 @@ async def _process_jira_event(
             )
 
     except Exception:
-        import traceback
-
         logger.error(traceback.format_exc())
 
 @router.post('/comment')
-async def post_jira_comment(req: JiraCommentRequest) -> dict:
-    """Post a comment to Jira. LLM calls this — code handles the Jira API."""
+async def post_jira_comment(
+    req: JiraCommentRequest,
+    request: Request,
+) -> dict:
+    """Post a comment to Jira and update conversation metadata with PR links.
 
+    After posting the comment, extracts any GitHub PR URLs from the comment
+    body and stores them in the conversation metadata for cross-referencing.
+    LLM calls this — code handles the Jira API and metadata updates.
+    """
     result = add_comment(req.issue_key, req.body)
-    return {'status': 'ok', 'comment_id': result['id']}
+    comment_id = result.get('id', '')
+
+    # Extract GitHub PR URLs from the comment body
+    pr_urls = re.findall(
+        r'https://github\.com/[\w.-]+/[\w.-]+/pull/\d+',
+        req.body,
+    )
+
+    if pr_urls:
+        try:
+            state = InjectorState()
+            setattr(state, USER_CONTEXT_ATTR, ADMIN)
+            async with get_app_conversation_info_service(
+                state, request
+            ) as info_service:
+                conversation = (
+                    await info_service.get_conversation_by_jira_issue_key(
+                        req.issue_key
+                    )
+                )
+                if conversation:
+                    # Merge with existing PRs, deduplicating while preserving order
+                    seen = set(conversation.github_pr)
+                    new_prs = [url for url in pr_urls if url not in seen]
+                    if new_prs:
+                        conversation.github_pr = conversation.github_pr + new_prs
+                        await info_service.save_app_conversation_info(
+                            conversation
+                        )
+                        logger.info(
+                            '[Automation] Updated conversation %s github_pr: '
+                            'added %d new PR(s) (total %d) for Jira issue %s',
+                            conversation.id,
+                            len(new_prs),
+                            len(conversation.github_pr),
+                            req.issue_key,
+                        )
+
+        except Exception:
+            logger.error(
+                '[Automation] Failed to update github_pr metadata '
+                'for Jira issue %s: %s',
+                req.issue_key,
+                traceback.format_exc(),
+            )
+
+    return {'status': 'ok', 'comment_id': comment_id}
 
 
 @router.post('/token-usage')
@@ -437,14 +541,6 @@ async def post_jira_token_usage(
     the agent server (not the DB) and posts or updates a single comment
     per issue (identified by the 🎯 *OpenHands Automation Complete* marker).
     """
-    from openhands.app_server.config import (
-        get_app_conversation_info_service,
-        get_httpx_client,
-    )
-    from openhands.app_server.sandbox.session_auth import (
-        validate_session_key,
-    )
-
     # Validate session and find sandbox
     session_api_key = request.headers.get('X-Session-API-Key', '')
     sandbox = await validate_session_key(session_api_key)
@@ -527,4 +623,16 @@ async def post_jira_token_usage(
     logger.info(
         f'[Automation] Token usage comment posted/updated on {req.issue_key}'
     )
+
+    # Pause sandbox after task completion
+    if sandbox and sandbox.id:
+        try:
+            await pause_sandbox(sandbox.id, state, request)
+        except Exception:
+            logger.error(
+                '[Automation] Failed to pause sandbox for Jira issue %s: %s',
+                req.issue_key,
+                traceback.format_exc(),
+            )
+
     return {'status': 'ok', 'comment_id': result.get('id', '')}

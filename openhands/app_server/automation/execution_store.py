@@ -399,6 +399,19 @@ class ExecutionStore:
             await session.refresh(pr)
             return self._github_pr_record_from_model(pr)
 
+    async def list_github_pull_requests_by_execution_id(
+        self, execution_id: int
+    ) -> list[GitHubPullRequestRecord]:
+        """List all GitHub pull request records associated with an execution."""
+        async with self._get_session() as session:
+            result = await session.execute(
+                select(StoredGitHubPullRequest).filter(
+                    StoredGitHubPullRequest.execution_id == execution_id
+                )
+            )
+            prs = result.scalars().all()
+            return [self._github_pr_record_from_model(pr) for pr in prs]
+
     # --- Jira Project Repository operations ---
 
     async def create_jira_project_repository(
