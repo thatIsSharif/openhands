@@ -1,6 +1,12 @@
 from fastapi import APIRouter
 
 from openhands.app_server.app_conversation import app_conversation_router
+# Import AutomationEventCallbackProcessor at startup so the discriminated
+# union registry knows about it before any EventCallbacks (stored in the
+# database from prior deployments) are deserialized.
+from openhands.app_server.automation.callback_processors import (
+    AutomationEventCallbackProcessor,  # noqa: F401
+)
 from openhands.app_server.automation.admin_router import (
     router as admin_router,
 )

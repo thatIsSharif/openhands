@@ -61,7 +61,13 @@ from openhands.app_server.config import (
 )
 from openhands.app_server.errors import SandboxError
 from openhands.app_server.event.event_service import EventService
-from openhands.app_server.event_callback.event_callback_models import EventCallback
+from openhands.app_server.automation.callback_processors import (
+    AutomationEventCallbackProcessor,
+)
+from openhands.app_server.event_callback.event_callback_models import (
+    EventCallback,
+    EventCallbackProcessor,
+)
 from openhands.app_server.event_callback.event_callback_service import (
     EventCallbackService,
 )
@@ -472,7 +478,15 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
             )
 
             # Setup default processors
-            processors = request.processors or []
+            processors: list[EventCallbackProcessor] = request.processors or []
+
+            # Inject agent server connectivity info into the automation
+            # callback processor so it can auto-reject pending actions when
+            # the conversation enters WAITING_FOR_CONFIRMATION.
+            for processor in processors:
+                if isinstance(processor, AutomationEventCallbackProcessor):
+                    processor.agent_server_url = agent_server_url
+                    processor.session_api_key = sandbox.session_api_key
 
             # Always ensure SetTitleCallbackProcessor is included
             has_set_title_processor = any(

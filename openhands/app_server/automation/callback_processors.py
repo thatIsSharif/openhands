@@ -1,7 +1,9 @@
 """Callback processors for execution lifecycle events.
 
 Handles post-execution state updates when conversations complete or fail.
-Hooks into the EventCallbackProcessor system to react to terminal states.
+Hooks into the EventCallbackProcessor system to react to terminal states
+and auto-reject pending actions when the conversation enters the
+WAITING_FOR_CONFIRMATION state (no user available to approve in automation).
 """
 
 from __future__ import annotations
@@ -30,14 +32,31 @@ from .execution_store import ExecutionStore
 
 
 class AutomationEventCallbackProcessor(EventCallbackProcessor):
-    """Event callback processor that updates automation executions.
+    """Event callback processor for automation conversations.
 
-    Registered on automation-triggered conversations. Listens for
-    ConversationStateUpdateEvent with terminal execution_status values
+    --- Terminal states ---
+    Listens for ConversationStateUpdateEvent with terminal execution_status
     (FINISHED, ERROR, STUCK) and updates the execution record.
+
+    --- WAITING_FOR_CONFIRMATION (auto-reject) ---
+    When the conversation enters WAITING_FOR_CONFIRMATION, the security
+    analyzer has flagged a HIGH-risk action and the ConfirmRisky policy
+    triggered. In automation there is no user to approve, so the processor
+    automatically rejects the pending action by POST-ing to the agent
+    server's ``/respond_to_confirmation`` endpoint. The agent receives a
+    ``UserRejectObservation`` and skips the action.
+
+    ``agent_server_url`` and ``session_api_key`` are populated by the
+    conversation-start flow before the EventCallback is persisted.
     """
 
     event_kind: ClassVar[EventKind] = 'ConversationStateUpdateEvent'
+
+    agent_server_url: str | None = None
+    """Set by the conversation-start flow before the callback is saved."""
+
+    session_api_key: str | None = None
+    """Set by the conversation-start flow before the callback is saved."""
 
     async def __call__(
         self,
@@ -56,6 +75,15 @@ class AutomationEventCallbackProcessor(EventCallbackProcessor):
         except (ValueError, TypeError):
             return None
 
+        # --- WAITING_FOR_CONFIRMATION → auto-reject (no user in automation) ---
+        if exec_status == ConversationExecutionStatus.WAITING_FOR_CONFIRMATION:
+            await self._auto_reject(
+                conversation_id=conversation_id,
+                callback=callback,
+            )
+            return None
+
+        # --- Terminal states (existing logic) --------------------------------
         if not exec_status.is_terminal():
             return None
 
@@ -101,5 +129,64 @@ class AutomationEventCallbackProcessor(EventCallbackProcessor):
             event_id=event.id,
             conversation_id=conversation_id,
         )
+
+    async def _auto_reject(
+        self,
+        conversation_id: UUID,
+        callback: EventCallback,
+    ) -> None:
+        """Auto-reject pending actions when conversation is waiting for confirmation.
+
+        POSTs a rejection to the agent server's ``respond_to_confirmation``
+        endpoint so the agent receives a ``UserRejectObservation`` and
+        continues execution without executing the dangerous action.
+        """
+        if not self.agent_server_url or not self.session_api_key:
+            logger.warning(
+                '[Automation] Cannot auto-reject conversation %s: '
+                'agent_server_url or session_api_key not set',
+                conversation_id,
+            )
+            return
+
+        try:
+            import httpx
+
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.post(
+                    (
+                        f'{self.agent_server_url}/api/conversations/'
+                        f'{conversation_id}/events/respond_to_confirmation'
+                    ),
+                    json={
+                        'accept': False,
+                        'reason': (
+                            'Auto-rejected by automation security policy — '
+                            'no user available to confirm.'
+                        ),
+                    },
+                    headers={'X-Session-API-Key': self.session_api_key},
+                )
+                response.raise_for_status()
+
+            logger.info(
+                '[Automation] Auto-rejected pending actions for '
+                'conversation %s',
+                conversation_id,
+                extra=build_log_context(
+                    conversation_id=str(conversation_id),
+                ),
+            )
+
+        except Exception as e:
+            logger.warning(
+                '[Automation] Failed to auto-reject for '
+                'conversation %s: %s',
+                conversation_id,
+                e,
+                extra=build_log_context(
+                    conversation_id=str(conversation_id),
+                ),
+            )
 
 
