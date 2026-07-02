@@ -410,6 +410,18 @@ async def _process_github_review_submitted(
                 review_comment=safe_review_comment,
             )
 
+            # ── Re-apply security BEFORE sending the message ─────────
+            # CRITICAL: ConfirmRisky + ensemble must be set BEFORE the
+            # agent starts processing the new command, not after. Otherwise
+            # dangerous commands execute without confirmation.
+            await OpenHandsClient()._setup_security_for_conversation(
+                agent_server_url=agent_server_url,
+                session_api_key=sandbox.session_api_key,
+                conversation_id=conversation_id,
+                execution_id=None,
+                jira_issue_key=None,
+            )
+
             response = await httpx_client.post(
                 f'{agent_server_url}/api/conversations/{conversation_id}/events',
                 json={
@@ -434,20 +446,6 @@ async def _process_github_review_submitted(
             logger.info(
                 f'[Automation] Review for PR #{pr_number} forwarded to '
                 f'conversation {conversation_id}'
-            )
-
-            # ── Re-apply security configuration for resumed conversation ───
-            # The original security setup from create_conversation is lost when
-            # the conversation reaches a terminal state and is resumed. This
-            # re-applies ConfirmRisky + the automation ensemble + starts a new
-            # auto-reject monitor so dangerous commands from follow-up reviews
-            # are properly detected, blocked, and auto-rejected.
-            await OpenHandsClient()._setup_security_for_conversation(
-                agent_server_url=agent_server_url,
-                session_api_key=sandbox.session_api_key,
-                conversation_id=conversation_id,
-                execution_id=None,
-                jira_issue_key=None,
             )
 
         except Exception:

@@ -438,11 +438,10 @@ class OpenHandsClient:
                 extra=log_ctx,
             )
 
-        except Exception as e:
-            logger.warning(
-                '[Security] Failed to setup security for conversation %s: %s',
+        except Exception:
+            logger.exception(
+                '[Security] Failed to setup security for conversation %s',
                 conversation_id,
-                e,
                 extra=log_ctx,
             )
 
