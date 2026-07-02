@@ -262,6 +262,27 @@ class AppConversationServiceBase(AppConversationService, ABC):
             workspace.working_dir, task.request.selected_repository
         )
 
+        # ── Inject security hooks into the workspace ─────────────────────────
+        # When hooks already exist in the project (checked by
+        # maybe_run_setup_script / the agent-server later), we leave them
+        # untouched.  The injected hooks are only a fallback for repos that
+        # do not have their own .openhands/hooks.json.
+        #
+        # The source is the OpenHands server repo's .openhands/ directory,
+        # which is present in the sandbox at {working_dir}/openhands/.openhands/
+        # when the server repo is cloned alongside the target repo.
+        hooks_source = f'{workspace.working_dir}/openhands/.openhands'
+        hooks_target = f'{project_dir}/.openhands'
+        await workspace.execute_command(
+            'if [ -f "' + hooks_source + '/hooks.json" ]'
+            ' && [ ! -f "' + hooks_target + '/hooks.json" ]; then'
+            '  mkdir -p "' + hooks_target + '/hooks" &&'
+            '  cp "' + hooks_source + '/hooks.json" "' + hooks_target + '/hooks.json" &&'
+            '  cp "' + hooks_source + '/hooks/block_dangerous.sh" "' + hooks_target + '/hooks/block_dangerous.sh" &&'
+            '  chmod +x "' + hooks_target + '/hooks/block_dangerous.sh"; fi',
+            timeout=30,
+        )
+
         task.status = AppConversationStartTaskStatus.RUNNING_SETUP_SCRIPT
         yield task
         await self.maybe_run_setup_script(workspace, project_dir)

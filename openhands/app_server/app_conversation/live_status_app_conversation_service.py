@@ -1274,6 +1274,7 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
         self,
         remote_workspace: AsyncRemoteWorkspace,
         project_dir: str,
+        fallback_project_dir: str | None = None,
     ) -> HookConfig | None:
         """Load hooks from .openhands/hooks.json in the remote workspace.
 
@@ -1288,6 +1289,9 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
             project_dir: Project root directory path in the sandbox. This should
                 already be the resolved project directory (e.g.,
                 {working_dir}/{repo_name} when a repo is selected).
+            fallback_project_dir: Optional fallback directory to check if no hooks
+                found in project_dir. Used to support global hooks at the sandbox
+                working_dir level that apply to all repos.
 
         Returns:
             HookConfig if hooks.json exists and is valid, None otherwise.
@@ -1308,6 +1312,7 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
             session_api_key=remote_workspace._headers.get('X-Session-API-Key'),
             project_dir=project_dir,
             httpx_client=self.httpx_client,
+            fallback_project_dir=fallback_project_dir,
         )
 
     async def _build_start_conversation_request_for_user(
@@ -1493,8 +1498,11 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
                     f'Attempting to load hooks from workspace: '
                     f'project_dir={project_dir}'
                 )
+                # Try repo-specific path first, then fall back to working_dir
+                # so global hooks at the sandbox root apply to all repos.
                 hook_config = await self._load_hooks_from_workspace(
-                    remote_workspace, project_dir
+                    remote_workspace, project_dir,
+                    fallback_project_dir=working_dir,
                 )
                 if hook_config:
                     _logger.debug(
