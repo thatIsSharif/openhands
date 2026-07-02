@@ -89,9 +89,6 @@ class OpenHandsClient:
             max_budget_per_task=max_budget,
             # Layer 2: Security analyzer active from first agent step
             security_analyzer='automation',
-            # For automation, enable confirmation mode so that security
-            # analyzers can block risky actions via the confirmation policy.
-            confirmation_mode=True,
             processors=processors,
             jira_issue_key=jira_issue_key,
         )
