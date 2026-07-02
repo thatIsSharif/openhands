@@ -137,15 +137,9 @@ class AutomationEventCallbackProcessor(EventCallbackProcessor):
     ) -> None:
         """Auto-reject pending actions when conversation is waiting for confirmation.
 
-        1. POSTs a rejection to the agent server's ``respond_to_confirmation``
-           endpoint so the agent receives a ``UserRejectObservation`` (the
-           dangerous action is never executed).
-        2. POSTs to ``/{conversation_id}/run`` to restart the agent loop so
-           it continues to its next step instead of staying idle.
-
-        Both calls use ``X-Session-API-Key`` for authentication and the
-        ``agent_server_url`` obtained from the sandbox at conversation-start
-        time.
+        POSTs a rejection to the agent server's ``respond_to_confirmation``
+        endpoint so the agent receives a ``UserRejectObservation`` and
+        continues execution without executing the dangerous action.
         """
         if not self.agent_server_url or not self.session_api_key:
             logger.warning(
@@ -155,17 +149,15 @@ class AutomationEventCallbackProcessor(EventCallbackProcessor):
             )
             return
 
-        base = self.agent_server_url.rstrip('/')
-        headers = {'X-Session-API-Key': self.session_api_key}
-
         try:
             import httpx
 
             async with httpx.AsyncClient(timeout=30.0) as client:
-                # Step 1: Reject the pending actions.
-                reject_resp = await client.post(
-                    f'{base}/api/conversations/'
-                    f'{conversation_id}/events/respond_to_confirmation',
+                response = await client.post(
+                    (
+                        f'{self.agent_server_url}/api/conversations/'
+                        f'{conversation_id}/events/respond_to_confirmation'
+                    ),
                     json={
                         'accept': False,
                         'reason': (
@@ -173,23 +165,12 @@ class AutomationEventCallbackProcessor(EventCallbackProcessor):
                             'no user available to confirm.'
                         ),
                     },
-                    headers=headers,
+                    headers={'X-Session-API-Key': self.session_api_key},
                 )
-                reject_resp.raise_for_status()
-
-                # Step 2: Restart the agent loop so it continues to the
-                # next step instead of staying idle.
-                run_resp = await client.post(
-                    f'{base}/api/conversations/{conversation_id}/run',
-                    headers=headers,
-                )
-                # 409 is expected if the conversation is already running,
-                # which is fine — it means the agent is already moving.
-                if run_resp.status_code not in (200, 409):
-                    run_resp.raise_for_status()
+                response.raise_for_status()
 
             logger.info(
-                '[Automation] Auto-rejected pending actions and restarted '
+                '[Automation] Auto-rejected pending actions for '
                 'conversation %s',
                 conversation_id,
                 extra=build_log_context(
