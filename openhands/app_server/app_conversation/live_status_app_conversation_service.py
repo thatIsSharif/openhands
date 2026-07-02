@@ -338,63 +338,6 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
             if request.max_iterations is not None:
                 start_conversation_request.max_iterations = request.max_iterations
 
-            # Apply task-level security_analyzer override (for automation conversations).
-            # This must happen BEFORE model_dump() so the analyzer is baked into
-            # the initial POST /api/conversations request, active from step one.
-            # IMPORTANT: Only SDK-native analyzer types can be used here, because
-            # the agent server (sandbox) only knows about SDK types.
-            # DEFAULT_HIGH_PATTERNS etc. are NOT exported from the SDK, so we use
-            # TWO PatternSecurityAnalyzer instances: one with all SDK defaults (no
-            # custom args) and one with ONLY our automation-specific patterns. The
-            # EnsembleSecurityAnalyzer merges them by taking the highest risk.
-            if request.security_analyzer == 'automation':
-                from openhands.app_server.automation.automation_security_analyzer import (
-                    AUTOMATION_GIT_PATTERNS,
-                    AUTOMATION_GITHUB_PATTERNS,
-                    AUTOMATION_HIGH_PATTERNS,
-                )
-                from openhands.sdk.security import EnsembleSecurityAnalyzer
-                from openhands.sdk.security.defense_in_depth import (
-                    PatternSecurityAnalyzer,
-                    PolicyRailSecurityAnalyzer,
-                )
-
-                start_conversation_request.security_analyzer = (
-                    EnsembleSecurityAnalyzer(
-                        analyzers=[
-                            PolicyRailSecurityAnalyzer(),
-                            # SDK defaults only (rm -rf, curl|sh, eval, etc.)
-                            PatternSecurityAnalyzer(),
-                            # Automation-specific patterns only
-                            PatternSecurityAnalyzer(
-                                high_patterns=(
-                                    AUTOMATION_HIGH_PATTERNS
-                                    + AUTOMATION_GIT_PATTERNS
-                                    + AUTOMATION_GITHUB_PATTERNS
-                                ),
-                            ),
-                        ]
-                    )
-                )
-            elif request.security_analyzer is not None:
-                analyzer = self._create_security_analyzer_from_string(
-                    request.security_analyzer
-                )
-                if analyzer is not None:
-                    start_conversation_request.security_analyzer = analyzer
-
-            # Apply task-level confirmation_mode override (for automation conversations).
-            # This enables the confirmation policy to deny risky actions.
-            # Note: StartConversationRequest only has confirmation_policy, not
-            # confirmation_mode — the policy is what the agent server evaluates
-            # at runtime, so we override it directly here.
-            if request.confirmation_mode is not None:
-                from openhands.sdk.security import ConfirmRisky
-
-                start_conversation_request.confirmation_policy = (
-                    ConfirmRisky()
-                )
-
             # update status
             task.status = AppConversationStartTaskStatus.STARTING_CONVERSATION
             task.agent_server_url = agent_server_url

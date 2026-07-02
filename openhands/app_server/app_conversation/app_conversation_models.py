@@ -237,23 +237,6 @@ class AppConversationStartRequest(OpenHandsModel):
             'When None, no budget enforcement is applied.'
         ),
     )
-    security_analyzer: str | None = Field(
-        default=None,
-        description=(
-            'Override security analyzer for this task. '
-            'Valid values: "automation", "llm", "none". '
-            "When None, the user's global security_analyzer is used."
-        ),
-    )
-    confirmation_mode: bool | None = Field(
-        default=None,
-        description=(
-            'Override confirmation mode for this task. '
-            'When True, risky actions require confirmation. '
-            'When False, no confirmation is needed. '
-            "When None, the user's global confirmation_mode is used."
-        ),
-    )
 
     # Secrets passed directly via API at conversation start time
     secrets: dict[str, SecretStr] | None = Field(
