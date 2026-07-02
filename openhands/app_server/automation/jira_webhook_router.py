@@ -318,18 +318,6 @@ async def _handle_comment_created(
                 token_usage_url=token_usage_url,
             )
 
-            # ── Re-apply security BEFORE sending the message ─────────
-            # CRITICAL: ConfirmRisky + ensemble must be set BEFORE the
-            # agent starts processing the new command, not after. Otherwise
-            # dangerous commands execute without confirmation.
-            await OpenHandsClient()._setup_security_for_conversation(
-                agent_server_url=agent_server_url,
-                session_api_key=sandbox.session_api_key,
-                conversation_id=conversation_id,
-                execution_id=None,
-                jira_issue_key=issue_key,
-            )
-
             response = await httpx_client.post(
                 f'{agent_server_url}/api/conversations/{conversation_id}/events',
                 json={
@@ -354,6 +342,20 @@ async def _handle_comment_created(
             logger.info(
                 f'[Automation] Comment from {issue_key} forwarded to '
                 f'conversation {conversation_id}'
+            )
+
+            # ── Re-apply security configuration for resumed conversation ───
+            # The original security setup from create_conversation is lost when
+            # the conversation reaches a terminal state and is resumed. This
+            # re-applies ConfirmRisky + the automation ensemble + starts a new
+            # auto-reject monitor so dangerous commands from follow-up comments
+            # are properly detected, blocked, and auto-rejected.
+            await OpenHandsClient()._setup_security_for_conversation(
+                agent_server_url=agent_server_url,
+                session_api_key=sandbox.session_api_key,
+                conversation_id=conversation_id,
+                execution_id=None,
+                jira_issue_key=issue_key,
             )
 
         except Exception as e:
