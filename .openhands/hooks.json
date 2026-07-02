@@ -2,9 +2,9 @@
   "pre_tool_use": [
     {
       "matcher": "terminal",
-      "hooks": [
-        { "command": "bash .openhands/hooks/block_dangerous.sh", "timeout": 10 }
-      ]
+      "type": "command",
+      "command": "bash .openhands/hooks/block_dangerous.sh",
+      "timeout": 10
     }
   ]
 }
