@@ -61,6 +61,9 @@ from openhands.app_server.config import (
 )
 from openhands.app_server.errors import SandboxError
 from openhands.app_server.event.event_service import EventService
+from openhands.app_server.automation.callback_processors import (
+    AutomationEventCallbackProcessor,
+)
 from openhands.app_server.event_callback.event_callback_models import (
     EventCallback,
     EventCallbackProcessor,
@@ -387,20 +390,15 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
                     start_conversation_request.security_analyzer = analyzer
 
             # Apply task-level confirmation_mode override (for automation conversations).
+            # This enables the confirmation policy to deny risky actions.
             # Note: StartConversationRequest only has confirmation_policy, not
             # confirmation_mode — the policy is what the agent server evaluates
             # at runtime, so we override it directly here.
-            if request.confirmation_mode is True:
+            if request.confirmation_mode is not None:
                 from openhands.sdk.security import ConfirmRisky
 
                 start_conversation_request.confirmation_policy = (
                     ConfirmRisky()
-                )
-            elif request.confirmation_mode is False:
-                from openhands.sdk.security import NeverConfirm
-
-                start_conversation_request.confirmation_policy = (
-                    NeverConfirm()
                 )
 
             # update status
@@ -481,6 +479,14 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
 
             # Setup default processors
             processors: list[EventCallbackProcessor] = request.processors or []
+
+            # Inject agent server connectivity info into the automation
+            # callback processor so it can auto-reject pending actions when
+            # the conversation enters WAITING_FOR_CONFIRMATION.
+            for processor in processors:
+                if isinstance(processor, AutomationEventCallbackProcessor):
+                    processor.agent_server_url = agent_server_url
+                    processor.session_api_key = sandbox.session_api_key
 
             # Always ensure SetTitleCallbackProcessor is included
             has_set_title_processor = any(
