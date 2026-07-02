@@ -17,7 +17,6 @@ Flow:
 
 from __future__ import annotations
 
-import asyncio
 import traceback
 
 from fastapi import APIRouter, BackgroundTasks, Request
@@ -434,21 +433,6 @@ async def _process_github_review_submitted(
             logger.info(
                 f'[Automation] Review for PR #{pr_number} forwarded to '
                 f'conversation {conversation_id}'
-            )
-
-            # ── Start auto-reject monitor for resumed conversation ───
-            # The original monitor from create_conversation already exited
-            # when the conversation reached a terminal state. Start a new
-            # one so that dangerous commands from this follow-up review
-            # are also auto-rejected.
-            asyncio.create_task(
-                OpenHandsClient()._auto_reject_monitor(
-                    agent_server_url=agent_server_url,
-                    session_api_key=sandbox.session_api_key,
-                    conversation_id=conversation_id,
-                    execution_id=None,
-                    jira_issue_key=None,
-                )
             )
 
         except Exception:
