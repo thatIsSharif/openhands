@@ -344,18 +344,19 @@ async def _handle_comment_created(
                 f'conversation {conversation_id}'
             )
 
-            # ── Re-apply security configuration for resumed conversation ───
-            # The original security setup from create_conversation is lost when
-            # the conversation reaches a terminal state and is resumed. This
-            # re-applies ConfirmRisky + the automation ensemble + starts a new
-            # auto-reject monitor so dangerous commands from follow-up comments
-            # are properly detected, blocked, and auto-rejected.
-            await OpenHandsClient()._setup_security_for_conversation(
-                agent_server_url=agent_server_url,
-                session_api_key=sandbox.session_api_key,
-                conversation_id=conversation_id,
-                execution_id=None,
-                jira_issue_key=issue_key,
+            # ── Start auto-reject monitor for resumed conversation ───
+            # The original monitor from create_conversation already exited
+            # when the conversation reached a terminal state. Start a new
+            # one so that dangerous commands from this follow-up comment
+            # are also auto-rejected.
+            asyncio.create_task(
+                OpenHandsClient()._auto_reject_monitor(
+                    agent_server_url=agent_server_url,
+                    session_api_key=sandbox.session_api_key,
+                    conversation_id=conversation_id,
+                    execution_id=None,
+                    jira_issue_key=issue_key,
+                )
             )
 
         except Exception as e:
