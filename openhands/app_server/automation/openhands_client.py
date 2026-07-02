@@ -37,8 +37,44 @@ from openhands.app_server.utils.docker_utils import (
 from openhands.app_server.utils.logger import (
     openhands_logger as logger,
 )
+from openhands.sdk.security import EnsembleSecurityAnalyzer
+from openhands.sdk.security.confirmation_policy import ConfirmRisky
+from openhands.sdk.security.defense_in_depth import (
+    PatternSecurityAnalyzer,
+    PolicyRailSecurityAnalyzer,
+)
 
 from .correlation import build_log_context
+
+
+def _build_automation_ensemble() -> EnsembleSecurityAnalyzer:
+    """Build the full EnsembleSecurityAnalyzer with all automation patterns.
+
+    Reusable in the initial conversation creation and when re-registering
+    the analyzer on a resumed conversation. Uses only SDK-native types so
+    the agent server can deserialize the payload correctly.
+    """
+    from openhands.app_server.automation.automation_security_analyzer import (
+        AUTOMATION_GIT_PATTERNS,
+        AUTOMATION_GITHUB_PATTERNS,
+        AUTOMATION_HIGH_PATTERNS,
+    )
+
+    return EnsembleSecurityAnalyzer(
+        analyzers=[
+            PolicyRailSecurityAnalyzer(),
+            # SDK defaults only (rm -rf, curl|sh, eval, etc.)
+            PatternSecurityAnalyzer(),
+            # Automation-specific patterns only
+            PatternSecurityAnalyzer(
+                high_patterns=(
+                    AUTOMATION_HIGH_PATTERNS
+                    + AUTOMATION_GIT_PATTERNS
+                    + AUTOMATION_GITHUB_PATTERNS
+                ),
+            ),
+        ]
+    )
 
 
 @dataclass
@@ -322,6 +358,94 @@ class OpenHandsClient:
             )
             return False
 
+    async def _setup_security_for_conversation(
+        self,
+        agent_server_url: str,
+        session_api_key: str,
+        conversation_id: str,
+        execution_id: str | None = None,
+        jira_issue_key: str | None = None,
+    ) -> None:
+        """POST security analyzer + ConfirmRisky, then start auto-reject monitor.
+
+        This is the single place where security configuration is applied to
+        a running conversation. It is called both at initial creation (from
+        ``_add_automation_security_analyzer``) and when resuming via follow-up
+        Jira comments or GitHub reviews.
+
+        Steps
+        -----
+        1. POST ``ConfirmRisky`` as the confirmation policy so dangerous
+           actions enter ``WAITING_FOR_CONFIRMATION``.
+        2. POST the ``EnsembleSecurityAnalyzer`` with all automation patterns,
+           replacing whatever analyzer the conversation may already have.
+        3. Start the ``_auto_reject_monitor`` background task to auto-reject
+           on behalf of the automation (no user available to approve).
+        """
+        base = agent_server_url.rstrip('/')
+        headers = {'X-Session-API-Key': session_api_key}
+        log_ctx = build_log_context(
+            execution_id=execution_id or '',
+            conversation_id=conversation_id,
+            jira_issue_key=jira_issue_key,
+        )
+
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                # 1. Set confirmation policy to ConfirmRisky
+                resp = await client.post(
+                    f'{base}/api/conversations/'
+                    f'{conversation_id}/confirmation_policy',
+                    json={'policy': ConfirmRisky().model_dump()},
+                    headers=headers,
+                )
+                resp.raise_for_status()
+                logger.info(
+                    '[Security] ConfirmRisky set for conversation %s',
+                    conversation_id,
+                    extra=log_ctx,
+                )
+
+                # 2. Set security analyzer with automation patterns
+                ensemble = _build_automation_ensemble()
+                resp = await client.post(
+                    f'{base}/api/conversations/'
+                    f'{conversation_id}/security_analyzer',
+                    json={'security_analyzer': ensemble.model_dump()},
+                    headers=headers,
+                )
+                resp.raise_for_status()
+                logger.info(
+                    '[Security] EnsembleSecurityAnalyzer set for conversation %s',
+                    conversation_id,
+                    extra=log_ctx,
+                )
+
+            # 3. Start background monitor (uses its own client)
+            asyncio.create_task(
+                self._auto_reject_monitor(
+                    agent_server_url=agent_server_url,
+                    session_api_key=session_api_key,
+                    conversation_id=conversation_id,
+                    execution_id=execution_id,
+                    jira_issue_key=jira_issue_key,
+                )
+            )
+
+            logger.info(
+                '[Security] Auto-reject monitor started for conversation %s',
+                conversation_id,
+                extra=log_ctx,
+            )
+
+        except Exception as e:
+            logger.warning(
+                '[Security] Failed to setup security for conversation %s: %s',
+                conversation_id,
+                e,
+                extra=log_ctx,
+            )
+
     async def _add_automation_security_analyzer(
         self,
         state,
@@ -330,18 +454,17 @@ class OpenHandsClient:
         execution_id: str | None = None,
         jira_issue_key: str | None = None,
     ) -> None:
-        """Re-register the security analyzer on a running conversation.
+        """Discover sandbox and apply security configuration.
 
-        SDK-native analyzers (PatternSecurityAnalyzer, PolicyRailSecurityAnalyzer)
-        are already baked into the initial POST /api/conversations. This method
-        replaces the conversation's analyzer with a new Ensemble that includes
-        the automation-specific patterns via PatternSecurityAnalyzer, ensuring
-        they are active even if the initial POST missed them.
+        This is a convenience wrapper used at *initial creation* time.
+        It retries sandbox discovery (the sandbox may not be ready yet)
+        and then delegates to ``_setup_security_for_conversation`` which
+        POSTs ``ConfirmRisky`` + the automation ensemble and starts the
+        auto-reject monitor.
 
-        Uses only SDK-native types so the agent server can deserialize the
-        payload correctly — app-server-only analyzer classes are avoided.
-
-        Failures are logged but do not break conversation execution.
+        For follow-up comments and reviews the webhook routers call
+        ``_setup_security_for_conversation`` directly (the sandbox info
+        is already available).
         """
         log_ctx = build_log_context(
             execution_id=execution_id or '',
@@ -350,13 +473,11 @@ class OpenHandsClient:
         )
 
         # Retry sandbox discovery — the sandbox may not be ready yet since
-        # it's created async with the conversation. Without this retry the
-        # monitor (started below) would silently never start and dangerous
-        # commands would hang at WAITING_FOR_CONFIRMATION forever.
+        # it's created async with the conversation.
         agent_server_url: str | None = None
         session_api_key: str | None = None
 
-        for attempt in range(10):
+        for _ in range(10):
             try:
                 async with get_app_conversation_info_service(
                     state, request
@@ -377,95 +498,27 @@ class OpenHandsClient:
                                     exposed_url.url
                                 )
                                 break
-
                         session_api_key = sandbox.session_api_key
 
                 if agent_server_url and session_api_key:
                     break
-
                 await asyncio.sleep(1)
-
             except Exception:
                 await asyncio.sleep(1)
 
         if not agent_server_url or not session_api_key:
             logger.warning(
                 '[Security] Cannot discover sandbox for conversation %s '
-                'after 10 retries — monitor NOT started. '
-                'Dangerous commands may hang at WAITING_FOR_CONFIRMATION.',
+                'after 10 retries — security NOT applied.',
                 conversation_id,
                 extra=log_ctx,
             )
             return
 
-        try:
-            # Build the full ensemble using only SDK-native types.
-            from openhands.app_server.automation.automation_security_analyzer import (
-                AUTOMATION_GIT_PATTERNS,
-                AUTOMATION_GITHUB_PATTERNS,
-                AUTOMATION_HIGH_PATTERNS,
-            )
-            from openhands.sdk.security import EnsembleSecurityAnalyzer
-            from openhands.sdk.security.defense_in_depth import (
-                PatternSecurityAnalyzer,
-                PolicyRailSecurityAnalyzer,
-            )
-
-            security_analyzer = EnsembleSecurityAnalyzer(
-                analyzers=[
-                    PolicyRailSecurityAnalyzer(),
-                    PatternSecurityAnalyzer(),
-                    PatternSecurityAnalyzer(
-                        high_patterns=(
-                            AUTOMATION_HIGH_PATTERNS
-                            + AUTOMATION_GIT_PATTERNS
-                            + AUTOMATION_GITHUB_PATTERNS
-                        ),
-                    ),
-                ]
-            )
-
-            # Start background monitor BEFORE the POST below.
-            # Even if the POST fails, the monitor is already running.
-            asyncio.create_task(
-                self._auto_reject_monitor(
-                    agent_server_url=agent_server_url,
-                    session_api_key=session_api_key,
-                    conversation_id=conversation_id,
-                    execution_id=execution_id,
-                    jira_issue_key=jira_issue_key,
-                )
-            )
-
-            logger.info(
-                '[Security] Auto-reject monitor started for conversation %s',
-                conversation_id,
-                extra=log_ctx,
-            )
-
-            # Best-effort: register the enhanced security analyzer.
-            async with get_httpx_client(state, request) as httpx_client:
-                payload = {'security_analyzer': security_analyzer.model_dump()}
-                response = await httpx_client.post(
-                    f'{agent_server_url}/api/conversations/'
-                    f'{conversation_id}/security_analyzer',
-                    json=payload,
-                    headers={'X-Session-API-Key': session_api_key},
-                    timeout=30.0,
-                )
-                response.raise_for_status()
-
-            logger.info(
-                '[Security] AutomationSecurityAnalyzer added to conversation %s',
-                conversation_id,
-                extra=log_ctx,
-            )
-
-        except Exception as e:
-            logger.warning(
-                '[Security] Failed to add AutomationSecurityAnalyzer for '
-                'conversation %s (monitor still active): %s',
-                conversation_id,
-                e,
-                extra=log_ctx,
-            )
+        await self._setup_security_for_conversation(
+            agent_server_url=agent_server_url,
+            session_api_key=session_api_key,
+            conversation_id=conversation_id,
+            execution_id=execution_id,
+            jira_issue_key=jira_issue_key,
+        )
