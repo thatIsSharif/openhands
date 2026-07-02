@@ -15,6 +15,7 @@ Supports:
 
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 import traceback
@@ -341,6 +342,21 @@ async def _handle_comment_created(
             logger.info(
                 f'[Automation] Comment from {issue_key} forwarded to '
                 f'conversation {conversation_id}'
+            )
+
+            # ── Start auto-reject monitor for resumed conversation ───
+            # The original monitor from create_conversation already exited
+            # when the conversation reached a terminal state. Start a new
+            # one so that dangerous commands from this follow-up comment
+            # are also auto-rejected.
+            asyncio.create_task(
+                OpenHandsClient()._auto_reject_monitor(
+                    agent_server_url=agent_server_url,
+                    session_api_key=sandbox.session_api_key,
+                    conversation_id=conversation_id,
+                    execution_id=None,
+                    jira_issue_key=issue_key,
+                )
             )
 
         except Exception as e:
