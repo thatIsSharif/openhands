@@ -30,11 +30,38 @@ def _load_file(name: str) -> str | None:
     return path.read_text()
 
 
-# Load hooks.json — the PreToolUse hook configuration
-HOOKS_JSON_STR: str | None = _load_file('hooks.json')
-
 # Load block_dangerous.sh — the actual shell script that checks patterns
 BLOCK_DANGEROUS_STR: str | None = _load_file('hooks/block_dangerous.sh')
+
+# The hooks.json template. We build this programmatically instead of loading
+# from disk so we can inject the absolute project_dir into the command path.
+def _build_hooks_json(project_dir: str) -> str:
+    """Build hooks.json with the correct format and absolute script path.
+
+    IMPORTANT: The format must be:
+      {"matcher": "...", "hooks": [{"type": "command", "command": "...", ...}]}
+    NOT:
+      {"matcher": "...", "type": "command", "command": "...", ...}
+    because HookMatcher expects a 'hooks' list of HookDefinition entries.
+    Without the 'hooks' wrapper, 'type' and 'command' are extra fields
+    that get silently dropped (extra: ignore) — no hooks ever register.
+    """
+    import json
+
+    return json.dumps({
+        "pre_tool_use": [
+            {
+                "matcher": "terminal",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": f"bash {project_dir}/.openhands/hooks/block_dangerous.sh",
+                        "timeout": 10,
+                    }
+                ],
+            }
+        ]
+    }, indent=2)
 
 
 async def inject_hooks_into_sandbox(
@@ -50,13 +77,14 @@ async def inject_hooks_into_sandbox(
             that runs a command in the sandbox.
         project_dir: The target repo's root directory inside the sandbox.
     """
-    if not HOOKS_JSON_STR or not BLOCK_DANGEROUS_STR:
+    if not BLOCK_DANGEROUS_STR:
         _logger.warning(
-            'Cannot inject security hooks: hook files not found on disk'
+            'Cannot inject security hooks: block_dangerous.sh not found on disk'
         )
         return
 
-    hooks_json_b64 = base64.b64encode(HOOKS_JSON_STR.encode()).decode()
+    hooks_json_str = _build_hooks_json(project_dir)
+    hooks_json_b64 = base64.b64encode(hooks_json_str.encode()).decode()
     script_b64 = base64.b64encode(BLOCK_DANGEROUS_STR.encode()).decode()
 
     cmd = (

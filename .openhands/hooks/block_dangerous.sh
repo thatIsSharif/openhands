@@ -12,7 +12,10 @@
 #          "tool_input":{"command":"..."}, "session_id":"...", "working_dir":"..."}
 # Output: {"decision": "deny", "reason": "..."} on stdout + exit 2 to block
 #         exit 0 to allow
-set -euo pipefail
+# NOTE: Intentionally NOT using set -e. grep -q returns non-zero on
+# non-match, which with set -e would cause early exit with code 1.
+# Hook system treats code 1 as "non-blocking error" (operation proceeds).
+# Only exit code 2 blocks. See: https://docs.openhands.dev/openhands/usage/customization/hooks
 
 # OpenHands sets these env vars directly (per docs) — no need to parse them
 # out of stdin JSON.
