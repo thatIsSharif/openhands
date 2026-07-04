@@ -41,15 +41,6 @@ deny() {
     exit 2
 }
 
-# ═══ TEST MODE ═══════════════════════════════════════════════════════════
-# Block EVERY git command on ANY branch. Replace this with the targeted
-# protected-branch patterns below once you've verified the hook is active.
-# ═════════════════════════════════════════════════════════════════════════
-if echo "$command" | grep -qE '^git[[:space:]]+'; then
-    deny "TEST MODE: All git commands are blocked (hook is working)."
-fi
-# ═══ END TEST MODE ═══════════════════════════════════════════════════════
-
 BRANCHES='(main|master|production|prod|live|primary|release)'
 
 # ────────────────────────────────────────────────────────────────────────
