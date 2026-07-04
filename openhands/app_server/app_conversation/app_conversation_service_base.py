@@ -262,6 +262,20 @@ class AppConversationServiceBase(AppConversationService, ABC):
             workspace.working_dir, task.request.selected_repository
         )
 
+        # ── Inject security hooks into the target repo ────────────────────────
+        # The hooks (hooks.json + block_dangerous.sh) live in the OpenHands
+        # server repo's .openhands directory.  They need to be copied into the
+        # target repo's .openhands/ inside the sandbox so the agent-server can
+        # load them.  We base64-encode the content and pipe it through echo +
+        # base64 -d to avoid shell escaping issues.
+        from openhands.app_server.automation.hook_files import (
+            inject_hooks_into_sandbox,
+        )
+
+        await inject_hooks_into_sandbox(
+            workspace.execute_command, project_dir
+        )
+
         task.status = AppConversationStartTaskStatus.RUNNING_SETUP_SCRIPT
         yield task
         await self.maybe_run_setup_script(workspace, project_dir)

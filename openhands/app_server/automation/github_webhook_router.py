@@ -31,6 +31,7 @@ from openhands.app_server.automation.github_automation_service import (
     GitHubAutomationService,
     verify_github_signature,
 )
+from openhands.app_server.automation.input_sanitizer import sanitize_input
 from openhands.app_server.automation.openhands_client import (
     OpenHandsClient,
 )
@@ -53,10 +54,11 @@ from openhands.app_server.utils.sandbox_utils import pause_sandbox
 
 def _get_agent_url_from_sandbox(sandbox) -> str | None:
     """Extract the agent server URL from a sandbox's exposed URLs."""
-    for exposed_url in (sandbox.exposed_urls or []):
+    for exposed_url in sandbox.exposed_urls or []:
         if exposed_url.name == AGENT_SERVER:
             return exposed_url.url
     return None
+
 
 router = APIRouter(prefix='/git/github/webhook', tags=['automation'])
 
@@ -102,8 +104,7 @@ async def handle_github_webhook(
     payload = await request.json()
 
     logger.info(
-        f'[Automation] GitHub webhook received: {event_type} '
-        f'(delivery: {delivery_id})',
+        f'[Automation] GitHub webhook received: {event_type} (delivery: {delivery_id})',
     )
 
     # Only accept review submissions
@@ -120,13 +121,8 @@ async def handle_github_webhook(
             reason=f'Unsupported action: {payload.get("action")}',
         )
 
-    review_state = (
-    payload.get('review', {})
-    .get('state', '')
-    .lower()
-    )
-    logger.info(
-    f'[Automation] Review submitted with state: {review_state}')
+    review_state = payload.get('review', {}).get('state', '').lower()
+    logger.info(f'[Automation] Review submitted with state: {review_state}')
 
     if review_state not in (
         'approved',
@@ -148,11 +144,7 @@ async def handle_github_webhook(
         repository=repository,
     )
 
-    github_secret = (
-        mapping.github_webhook_secret
-        if mapping
-        else None
-    )
+    github_secret = mapping.github_webhook_secret if mapping else None
     if github_secret:
         signature = request.headers.get('X-Hub-Signature-256')
 
@@ -161,9 +153,7 @@ async def handle_github_webhook(
             signature,
             github_secret,
         ):
-            logger.warning(
-                '[Automation] Invalid GitHub webhook signature'
-            )
+            logger.warning('[Automation] Invalid GitHub webhook signature')
 
             return GitHubWebhookResponse(
                 status='rejected',
@@ -222,9 +212,7 @@ async def _run_github_background(
             f'(execution: {result.get("execution_id", "N/A")})',
         )
     except Exception as e:
-        logger.error(
-            f'[Automation] GitHub {handler_name} processing failed: {e}'
-        )
+        logger.error(f'[Automation] GitHub {handler_name} processing failed: {e}')
 
 
 async def _process_github_review_comment(
@@ -303,9 +291,7 @@ async def _process_github_review_submitted(
     async with get_app_conversation_info_service(
         request.state, request
     ) as info_service:
-        conversation = await info_service.get_conversation_by_pr_url(
-            pr_url
-        )
+        conversation = await info_service.get_conversation_by_pr_url(pr_url)
 
     if not conversation:
         logger.info(
@@ -329,9 +315,7 @@ async def _process_github_review_submitted(
     )
 
     # Resume the sandbox if needed
-    async with get_sandbox_service(
-        request.state, request
-    ) as sandbox_service:
+    async with get_sandbox_service(request.state, request) as sandbox_service:
         sandbox = await sandbox_service.get_sandbox(sandbox_id)
         if sandbox is None:
             logger.warning(
@@ -349,8 +333,7 @@ async def _process_github_review_submitted(
 
         if sandbox.status == SandboxStatus.PAUSED:
             logger.info(
-                f'[Automation] Resuming sandbox {sandbox_id} for '
-                f'PR #{pr_number}'
+                f'[Automation] Resuming sandbox {sandbox_id} for PR #{pr_number}'
             )
             await sandbox_service.resume_sandbox(sandbox_id)
 
@@ -379,14 +362,10 @@ async def _process_github_review_submitted(
             return
 
     # Send the review as a message to the existing conversation
-    async with get_httpx_client(
-        request.state, request
-    ) as httpx_client:
+    async with get_httpx_client(request.state, request) as httpx_client:
         try:
             # Get fresh sandbox info for the agent server URL and session key
-            async with get_sandbox_service(
-                request.state, request
-            ) as sandbox_service:
+            async with get_sandbox_service(request.state, request) as sandbox_service:
                 sandbox = await sandbox_service.get_sandbox(sandbox_id)
 
             if not sandbox or not sandbox.exposed_urls:
@@ -404,9 +383,7 @@ async def _process_github_review_submitted(
                 )
                 return
 
-            agent_server_url = replace_localhost_hostname_for_docker(
-                agent_server_url
-            )
+            agent_server_url = replace_localhost_hostname_for_docker(agent_server_url)
 
             # Build the review message from the existing-conversation template
             state_label = {
@@ -415,18 +392,25 @@ async def _process_github_review_submitted(
                 'comment': '💬 Comment',
             }.get(review_state, f'📝 Review ({review_state})')
 
+            # ── Input sanitization (Layer 1) ────────────────────────
+            safe_review_comment = sanitize_input(
+                review_comment, field_name='github_existing_review_comment'
+            )
+            safe_reviewer = sanitize_input(
+                reviewer, field_name='github_existing_reviewer'
+            )
+
             message_text = render_prompt(
                 'github_review_submitted_existing_conversation.j2',
                 state_label=state_label,
                 full_name=full_name,
                 pr_url=pr_url,
-                reviewer=reviewer,
-                review_comment=review_comment,
+                reviewer=safe_reviewer,
+                review_comment=safe_review_comment,
             )
 
             response = await httpx_client.post(
-                f'{agent_server_url}/api/conversations/'
-                f'{conversation_id}/events',
+                f'{agent_server_url}/api/conversations/{conversation_id}/events',
                 json={
                     'role': 'user',
                     'content': [
@@ -438,11 +422,7 @@ async def _process_github_review_submitted(
                     'run': True,
                 },
                 headers=(
-                    {
-                        'X-Session-API-Key': (
-                            sandbox.session_api_key
-                        )
-                    }
+                    {'X-Session-API-Key': (sandbox.session_api_key)}
                     if sandbox.session_api_key
                     else {}
                 ),
@@ -482,12 +462,8 @@ async def post_github_pr_comment(
         pr_url = f'https://github.com/{req.repository}/pull/{req.pr_number}'
         state = InjectorState()
         setattr(state, USER_CONTEXT_ATTR, ADMIN)
-        async with get_app_conversation_info_service(
-            state, request
-        ) as info_service:
-            conversation = await info_service.get_conversation_by_pr_url(
-                pr_url
-            )
+        async with get_app_conversation_info_service(state, request) as info_service:
+            conversation = await info_service.get_conversation_by_pr_url(pr_url)
 
         if conversation and conversation.sandbox_id:
             await pause_sandbox(conversation.sandbox_id, state, request)

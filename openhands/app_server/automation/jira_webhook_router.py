@@ -27,6 +27,7 @@ from openhands.app_server.automation.execution_service import (
     ExecutionService,
 )
 from openhands.app_server.automation.execution_store import ExecutionStore
+from openhands.app_server.automation.input_sanitizer import sanitize_input
 from openhands.app_server.automation.jira_automation_service import (
     JiraAutomationService,
     verify_jira_signature,
@@ -61,6 +62,7 @@ from openhands.app_server.utils.sandbox_utils import pause_sandbox
 class JiraCommentRequest(BaseModel):
     issue_key: str
     body: str
+
 
 router = APIRouter(prefix='/jira/start', tags=['automation'])
 
@@ -111,20 +113,14 @@ async def handle_jira_webhook(
         signature = request.headers.get('X-Hub-Signature')
         if not verify_jira_signature(body, signature, jira_secret):
             logger.warning('[Automation] Invalid Jira webhook signature')
-            return JiraWebhookResponse(
-                status='rejected', reason='Invalid signature'
-            )
+            return JiraWebhookResponse(status='rejected', reason='Invalid signature')
 
     # Schedule background processing
-    background_tasks.add_task(
-        _process_jira_event, payload, request
-    )
+    background_tasks.add_task(_process_jira_event, payload, request)
 
     return JiraWebhookResponse(
         status='accepted',
-        issue_key=(
-            payload.get('issue', {}).get('key')
-        ),
+        issue_key=(payload.get('issue', {}).get('key')),
     )
 
 
@@ -149,30 +145,23 @@ async def _handle_comment_created(
     comment_body = (comment.get('body', '') or '').strip()
 
     if not issue_key or not comment_body:
-        logger.info(
-            '[Automation] Comment event missing issue_key or comment body'
-        )
+        logger.info('[Automation] Comment event missing issue_key or comment body')
         return False
 
     # Check for @openhands mention (case-insensitive)
     if '@openhands' not in comment_body.lower():
         logger.info(
-            f'[Automation] Comment on {issue_key} does not mention @openhands, '
-            'skipping'
+            f'[Automation] Comment on {issue_key} does not mention @openhands, skipping'
         )
         return False
 
-    logger.info(
-        f'[Automation] @openhands mentioned in comment on {issue_key}'
-    )
+    logger.info(f'[Automation] @openhands mentioned in comment on {issue_key}')
 
     # Look up existing conversation by Jira issue key
     async with get_app_conversation_info_service(
         request.state, request
     ) as info_service:
-        conversation = await info_service.get_conversation_by_jira_issue_key(
-            issue_key
-        )
+        conversation = await info_service.get_conversation_by_jira_issue_key(issue_key)
 
     if not conversation:
         logger.info(
@@ -209,9 +198,7 @@ async def _handle_comment_created(
     )
 
     # Resume the sandbox if needed
-    async with get_sandbox_service(
-        request.state, request
-    ) as sandbox_service:
+    async with get_sandbox_service(request.state, request) as sandbox_service:
         sandbox = await sandbox_service.get_sandbox(sandbox_id)
         if sandbox is None:
             logger.warning(
@@ -241,10 +228,7 @@ async def _handle_comment_created(
             )
             return True
         if sandbox.status == SandboxStatus.PAUSED:
-            logger.info(
-                f'[Automation] Resuming sandbox {sandbox_id} for '
-                f'{issue_key}'
-            )
+            logger.info(f'[Automation] Resuming sandbox {sandbox_id} for {issue_key}')
             await sandbox_service.resume_sandbox(sandbox_id)
 
             # Wait for sandbox to be fully ready
@@ -293,14 +277,10 @@ async def _handle_comment_created(
             return True
 
     # Send the comment as a message to the conversation
-    async with get_httpx_client(
-        request.state, request
-    ) as httpx_client:
+    async with get_httpx_client(request.state, request) as httpx_client:
         try:
             # Get fresh sandbox info for the agent server URL and session key
-            async with get_sandbox_service(
-                request.state, request
-            ) as sandbox_service:
+            async with get_sandbox_service(request.state, request) as sandbox_service:
                 sandbox = await sandbox_service.get_sandbox(sandbox_id)
 
             if not sandbox or not sandbox.exposed_urls:
@@ -318,27 +298,27 @@ async def _handle_comment_created(
                 )
                 return True
 
-            agent_server_url = replace_localhost_hostname_for_docker(
-                agent_server_url
-            )
+            agent_server_url = replace_localhost_hostname_for_docker(agent_server_url)
 
             # Build the token-usage endpoint from the request
             base_url = str(request.base_url).rstrip('/')
-            token_usage_url = (
-                f'{base_url}/api/v1/jira/start/token-usage'
+            token_usage_url = f'{base_url}/api/v1/jira/start/token-usage'
+
+            # ── Input sanitization (Layer 1) ────────────────────────
+            safe_comment_body = sanitize_input(
+                comment_body, field_name='jira_existing_comment'
             )
 
             # Render the message from the existing-conversation template
             message_text = render_prompt(
                 'jira_existing_conversation.j2',
                 issue_key=issue_key,
-                comment_body=comment_body,
+                comment_body=safe_comment_body,
                 token_usage_url=token_usage_url,
             )
 
             response = await httpx_client.post(
-                f'{agent_server_url}/api/conversations/'
-                f'{conversation_id}/events',
+                f'{agent_server_url}/api/conversations/{conversation_id}/events',
                 json={
                     'role': 'user',
                     'content': [
@@ -350,11 +330,7 @@ async def _handle_comment_created(
                     'run': True,
                 },
                 headers=(
-                    {
-                        'X-Session-API-Key': (
-                            sandbox.session_api_key
-                        )
-                    }
+                    {'X-Session-API-Key': (sandbox.session_api_key)}
                     if sandbox.session_api_key
                     else {}
                 ),
@@ -400,9 +376,7 @@ async def _process_jira_event(
 
         # Only process assignment events
         if payload.get('issue_event_type_name') != 'issue_assigned':
-            logger.info(
-                '[Automation] Ignoring Jira event: not an assignment event'
-            )
+            logger.info('[Automation] Ignoring Jira event: not an assignment event')
             return
 
         assignee_change = next(
@@ -415,15 +389,13 @@ async def _process_jira_event(
         )
 
         if not assignee_change:
-            logger.info(
-                '[Automation] Ignoring Jira event: no assignee change found'
-            )
+            logger.info('[Automation] Ignoring Jira event: no assignee change found')
             return
 
         if target_account_id and assignee_change.get('to') != target_account_id:
             logger.info(
-                "[Automation] Ignoring Jira event: not assigned to target user "
-                f"(to={assignee_change.get('to')})"
+                '[Automation] Ignoring Jira event: not assigned to target user '
+                f'(to={assignee_change.get("to")})'
             )
             return
         elif not target_account_id:
@@ -431,9 +403,7 @@ async def _process_jira_event(
                 '[Automation] No JIRA_TARGET_ACCOUNT_ID set, processing any assignee'
             )
 
-        logger.info(
-            '[Automation] Issue assigned to target user, starting automation'
-        )
+        logger.info('[Automation] Issue assigned to target user, starting automation')
 
         # Build services using OSS DI
         store = ExecutionStore()
@@ -446,16 +416,12 @@ async def _process_jira_event(
         )
 
         result = await jira_service.process_issue_created(
-            payload=payload,
-            state=request.state,
-            request=request
+            payload=payload, state=request.state, request=request
         )
 
         if result.get('status') == 'multi':
             executions = result.get('executions', [])
-            ids = ', '.join(
-                e.get('execution_id', 'N/A') for e in executions
-            )
+            ids = ', '.join(e.get('execution_id', 'N/A') for e in executions)
             logger.info(
                 f'[Automation] Jira event processed: multi '
                 f'({len(executions)} executions: {ids})',
@@ -468,6 +434,7 @@ async def _process_jira_event(
 
     except Exception:
         logger.error(traceback.format_exc())
+
 
 @router.post('/comment')
 async def post_jira_comment(
@@ -496,10 +463,8 @@ async def post_jira_comment(
             async with get_app_conversation_info_service(
                 state, request
             ) as info_service:
-                conversation = (
-                    await info_service.get_conversation_by_jira_issue_key(
-                        req.issue_key
-                    )
+                conversation = await info_service.get_conversation_by_jira_issue_key(
+                    req.issue_key
                 )
                 if conversation:
                     # Merge with existing PRs, deduplicating while preserving order
@@ -507,9 +472,7 @@ async def post_jira_comment(
                     new_prs = [url for url in pr_urls if url not in seen]
                     if new_prs:
                         conversation.github_pr = conversation.github_pr + new_prs
-                        await info_service.save_app_conversation_info(
-                            conversation
-                        )
+                        await info_service.save_app_conversation_info(conversation)
                         logger.info(
                             '[Automation] Updated conversation %s github_pr: '
                             'added %d new PR(s) (total %d) for Jira issue %s',
@@ -554,7 +517,8 @@ async def post_jira_token_usage(
     setattr(state, USER_CONTEXT_ATTR, ADMIN)
     async with get_app_conversation_info_service(state) as info_service:
         page = await info_service.search_app_conversation_info(
-            sandbox_id__eq=sandbox.id, limit=1,
+            sandbox_id__eq=sandbox.id,
+            limit=1,
         )
 
     conv_info = page.items[0] if page.items else None
@@ -566,7 +530,9 @@ async def post_jira_token_usage(
     # Fetch live metrics from agent server, fall back to DB
     async with get_httpx_client(state) as httpx_client:
         live = await fetch_live_agent_metrics(
-            agent_server_url, conversation_id, session_api_key,
+            agent_server_url,
+            conversation_id,
+            session_api_key,
             httpx_client,
         )
 
@@ -577,23 +543,28 @@ async def post_jira_token_usage(
             'model_name': m.model_name,
             'prompt_tokens': (
                 m.accumulated_token_usage.prompt_tokens
-                if m.accumulated_token_usage else 0
+                if m.accumulated_token_usage
+                else 0
             ),
             'completion_tokens': (
                 m.accumulated_token_usage.completion_tokens
-                if m.accumulated_token_usage else 0
+                if m.accumulated_token_usage
+                else 0
             ),
             'cache_read_tokens': (
                 m.accumulated_token_usage.cache_read_tokens
-                if m.accumulated_token_usage else 0
+                if m.accumulated_token_usage
+                else 0
             ),
             'cache_write_tokens': (
                 m.accumulated_token_usage.cache_write_tokens
-                if m.accumulated_token_usage else 0
+                if m.accumulated_token_usage
+                else 0
             ),
             'reasoning_tokens': (
                 m.accumulated_token_usage.reasoning_tokens
-                if m.accumulated_token_usage else 0
+                if m.accumulated_token_usage
+                else 0
             ),
         }
 
@@ -620,9 +591,7 @@ async def post_jira_token_usage(
     )
 
     result = add_or_update_token_usage_comment(req.issue_key, comment_body)
-    logger.info(
-        f'[Automation] Token usage comment posted/updated on {req.issue_key}'
-    )
+    logger.info(f'[Automation] Token usage comment posted/updated on {req.issue_key}')
 
     # Pause sandbox after task completion
     if sandbox and sandbox.id:

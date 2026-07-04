@@ -45,6 +45,7 @@ async def fetch_hooks_from_agent_server(
     session_api_key: str | None,
     project_dir: str,
     httpx_client: httpx.AsyncClient,
+    fallback_project_dir: str | None = None,
 ) -> HookConfig | None:
     """Fetch hooks from the agent-server, raising on HTTP/connection errors.
 
@@ -57,6 +58,9 @@ async def fetch_hooks_from_agent_server(
         session_api_key: Session API key for authentication (optional)
         project_dir: Workspace directory path for project hooks
         httpx_client: Shared HTTP client for making the request
+        fallback_project_dir: Optional fallback directory to check if no hooks
+            found in project_dir. Used to support global hooks at the sandbox
+            working_dir level that apply to all repos.
 
     Returns:
         HookConfig if hooks.json exists and is valid, None if no hooks found.
@@ -69,35 +73,49 @@ async def fetch_hooks_from_agent_server(
         f'fetch_hooks_from_agent_server called: '
         f'agent_server_url={agent_server_url}, project_dir={project_dir}'
     )
-    payload = {'project_dir': project_dir}
 
-    headers = {'Content-Type': 'application/json'}
-    if session_api_key:
-        headers['X-Session-API-Key'] = session_api_key
+    async def _try_dir(dir_to_try: str) -> HookConfig | None:
+        payload = {'project_dir': dir_to_try}
+        headers = {'Content-Type': 'application/json'}
+        if session_api_key:
+            headers['X-Session-API-Key'] = session_api_key
 
-    response = await httpx_client.post(
-        f'{agent_server_url}/api/hooks',
-        json=payload,
-        headers=headers,
-        timeout=30.0,
-    )
-    response.raise_for_status()
+        response = await httpx_client.post(
+            f'{agent_server_url}/api/hooks',
+            json=payload,
+            headers=headers,
+            timeout=30.0,
+        )
+        response.raise_for_status()
 
-    data = response.json()
+        data = response.json()
+        hook_config_data = data.get('hook_config')
+        if hook_config_data is None:
+            _logger.debug('No hooks found in %s', dir_to_try)
+            return None
 
-    hook_config_data = data.get('hook_config')
-    if hook_config_data is None:
-        _logger.debug('No hooks found in workspace')
-        return None
+        hook_config = HookConfig.from_dict(hook_config_data)
+        if hook_config.is_empty():
+            _logger.debug('Hooks config is empty in %s', dir_to_try)
+            return None
 
-    hook_config = HookConfig.from_dict(hook_config_data)
+        _logger.debug('Loaded hooks from agent-server for %s', dir_to_try)
+        return hook_config
 
-    if hook_config.is_empty():
-        _logger.debug('Hooks config is empty')
-        return None
+    # Try the repo-specific project_dir first
+    hook_config = await _try_dir(project_dir)
+    if hook_config is not None:
+        return hook_config
 
-    _logger.debug(f'Loaded hooks from agent-server for {project_dir}')
-    return hook_config
+    # Fall back to the working_dir level (if different from project_dir)
+    if fallback_project_dir and fallback_project_dir != project_dir:
+        _logger.debug(
+            'No hooks in %s, trying fallback %s',
+            project_dir, fallback_project_dir,
+        )
+        return await _try_dir(fallback_project_dir)
+
+    return None
 
 
 async def load_hooks_from_agent_server(
@@ -105,6 +123,7 @@ async def load_hooks_from_agent_server(
     session_api_key: str | None,
     project_dir: str,
     httpx_client: httpx.AsyncClient,
+    fallback_project_dir: str | None = None,
 ) -> HookConfig | None:
     """Load hooks from the agent-server, swallowing errors gracefully.
 
@@ -120,13 +139,19 @@ async def load_hooks_from_agent_server(
         session_api_key: Session API key for authentication (optional)
         project_dir: Workspace directory path for project hooks
         httpx_client: Shared HTTP client for making the request
+        fallback_project_dir: Optional fallback directory to check if no hooks
+            found in project_dir.
 
     Returns:
         HookConfig if hooks.json exists and is valid, None otherwise.
     """
     try:
         return await fetch_hooks_from_agent_server(
-            agent_server_url, session_api_key, project_dir, httpx_client
+            agent_server_url,
+            session_api_key,
+            project_dir,
+            httpx_client,
+            fallback_project_dir=fallback_project_dir,
         )
     except httpx.HTTPStatusError as e:
         _logger.warning(

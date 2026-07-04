@@ -84,7 +84,6 @@ class OpenHandsClient:
             max_budget_per_task=max_budget,
 
             processors=processors,
-
             jira_issue_key=jira_issue_key,
         )
 

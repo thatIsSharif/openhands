@@ -19,15 +19,18 @@ from openhands.app_server.utils.logger import openhands_logger as logger
 from .correlation import build_log_context
 from .execution_models import ExecutionState, SourceType
 from .execution_service import ExecutionService
+from .input_sanitizer import sanitize_input
 from .openhands_client import OpenHandsClient
 from .prompt_renderer import render_prompt
 
-GITHUB_WEBHOOK_EVENTS = frozenset({
-    'pull_request_review_comment',
-    'pull_request_review',
-    'pull_request',
-    'issue_comment',
-})
+GITHUB_WEBHOOK_EVENTS = frozenset(
+    {
+        'pull_request_review_comment',
+        'pull_request_review',
+        'pull_request',
+        'issue_comment',
+    }
+)
 
 
 def verify_github_signature(
@@ -44,7 +47,7 @@ def verify_github_signature(
     if not signature_header.startswith(prefix):
         return False
 
-    received = signature_header[len(prefix):]
+    received = signature_header[len(prefix) :]
     expected = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
     return hmac.compare_digest(received, expected)
 
@@ -195,9 +198,7 @@ class GitHubAutomationService:
         # Extract PR review data
         review_data = extract_github_review_data(payload)
         if not review_data:
-            logger.warning(
-                '[Automation] GitHub webhook: missing required fields'
-            )
+            logger.warning('[Automation] GitHub webhook: missing required fields')
             return {
                 'status': 'skipped',
                 'reason': 'Missing required fields in payload',
@@ -251,13 +252,19 @@ class GitHubAutomationService:
         base_url = str(request.base_url).rstrip('/')
         comment_endpoint = f'{base_url}/api/v1/git/github/webhook/comment'
 
+        # ── Input sanitization (Layer 1) ────────────────────────────
+        safe_review_comment = sanitize_input(
+            review_comment, field_name='github_review_comment'
+        )
+        safe_reviewer = sanitize_input(reviewer, field_name='github_reviewer')
+
         # Build prompt for the agent
         prompt = render_prompt(
             'github_review_conversation.j2',
             pr_number=pr_number,
             repository=repository,
-            reviewer=reviewer,
-            review_comment=review_comment,
+            reviewer=safe_reviewer,
+            review_comment=safe_review_comment,
             branch=branch,
             comment_endpoint=comment_endpoint,
         )
@@ -379,6 +386,14 @@ class GitHubAutomationService:
         base_url = str(request.base_url).rstrip('/')
         comment_endpoint = f'{base_url}/api/v1/git/github/webhook/comment'
 
+        # ── Input sanitization (Layer 1) ────────────────────────────
+        safe_review_comment = sanitize_input(
+            review_comment, field_name='github_review_submitted_comment'
+        )
+        safe_reviewer = sanitize_input(
+            reviewer, field_name='github_review_submitted_reviewer'
+        )
+
         # Build prompt for the agent
         state_desc = {
             'approved': 'approved',
@@ -389,9 +404,9 @@ class GitHubAutomationService:
             'github_review_submitted_conversation.j2',
             pr_number=pr_number,
             repository=repository,
-            reviewer=reviewer,
+            reviewer=safe_reviewer,
             review_state=review_state,
-            review_comment=review_comment,
+            review_comment=safe_review_comment,
             branch=branch,
             comment_endpoint=comment_endpoint,
         )
