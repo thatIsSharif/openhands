@@ -53,9 +53,8 @@ class CommandEnforcementProcessor(EventCallbackProcessor):
 
     Registered on automation-triggered conversations. Listens for
     ActionEvent with tool_name='terminal', checks the command against
-    the ``dangerous_*`` patterns in ``_INJECTION_PATTERNS``
-    (git push --force, rm -rf /, DROP DATABASE, etc.), and interrupts
-    the conversation if a match is found.
+    ``block_dangerous.sh`` (the same PreToolUse hook script), and
+    interrupts the conversation if a match is found.
 
     After interrupting, posts a security alert comment back to the source
     (GitHub PR or Jira issue) explaining which command was blocked.
