@@ -56,6 +56,7 @@ class ComplexityAnalyzer:
     model: str = 'openai/deepseek-v4-flash-free'
     api_key: str | None = None
     base_url: str = 'https://opencode.ai/zen/go/v1'
+    max_tokens: int = 500
     timeout: int = 15
 
     @classmethod
@@ -64,6 +65,7 @@ class ComplexityAnalyzer:
             model=os.getenv('OH_JIRA_ANALYSIS_MODEL', cls.model),
             api_key=os.getenv('OH_JIRA_ANALYSIS_API_KEY'),
             base_url=os.getenv('OH_JIRA_ANALYSIS_BASE_URL', cls.base_url),
+            max_tokens=int(os.getenv('OH_JIRA_ANALYSIS_MAX_TOKENS', '500'))
         )
 
     async def analyze(self, issue_data: dict) -> ComplexityResult | None:
@@ -83,7 +85,7 @@ class ComplexityAnalyzer:
         kwargs: dict = {
             'model': self.model,
             'messages': [{'role': 'user', 'content': prompt}],
-            'max_tokens': 500,
+            'max_tokens': self.max_tokens,
             'timeout': self.timeout,
         }
         if self.api_key:
@@ -123,12 +125,12 @@ class ComplexityAnalyzer:
     def _parse_response(content: str) -> ComplexityResult | None:
         """Extract a complexity tier from *content*.
 
-        Tries JSON first (backward compatible), then falls back to finding
+        Tries JSON first, then falls back to finding
         the first occurrence of ``complex``, ``medium``, or ``low`` in the text.
         """
         cleaned = content.strip().lower()
 
-        # Try JSON first (supports old prompt format)
+        # Try JSON first
         try:
             # Strip markdown code fences if present
             stripped = re.sub(r'^```(?:json)?\s*', '', cleaned)
