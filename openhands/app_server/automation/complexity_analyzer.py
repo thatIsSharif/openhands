@@ -83,8 +83,7 @@ class ComplexityAnalyzer:
         kwargs: dict = {
             'model': self.model,
             'messages': [{'role': 'user', 'content': prompt}],
-            'max_tokens': 100,
-            'temperature': 0,
+            'max_tokens': 500,
             'timeout': self.timeout,
         }
         if self.api_key:
@@ -96,23 +95,27 @@ class ComplexityAnalyzer:
             response = await litellm.acompletion(**kwargs)
             content = response.choices[0].message.content
             if not content:
+                finish = getattr(
+                    response.choices[0], 'finish_reason', 'unknown'
+                )
                 logger.warning(
                     '[ComplexityAnalyzer] LLM returned empty response '
-                    '(model=%s, finish_reason=%s)',
+                    '(model=%s, finish_reason=%s, '
+                    'prompt_tokens=%s, completion_tokens=%s)',
                     self.model,
-                    getattr(
-                        response.choices[0], 'finish_reason', 'unknown'
-                    ),
+                    finish,
+                    getattr(response.usage, 'prompt_tokens', '?'),
+                    getattr(response.usage, 'completion_tokens', '?'),
                 )
                 return None
 
             return self._parse_response(content)
 
-        except Exception:
+        except Exception as e:
             logger.warning(
-                '[ComplexityAnalyzer] LLM call failed (model=%s)',
+                '[ComplexityAnalyzer] LLM call failed (model=%s, error=%s)',
                 self.model,
-                exc_info=True,
+                e,
             )
             return None
 
