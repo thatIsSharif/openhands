@@ -17,12 +17,18 @@ import hmac
 import re
 from dataclasses import dataclass
 
+from openhands.app_server.utils.jira import add_comment
 from openhands.app_server.utils.logger import openhands_logger as logger
 
 from .correlation import build_log_context
 from .execution_models import ExecutionState, SourceType
 from .execution_service import ExecutionService
-from .input_sanitizer import sanitize_input, validate_jira_issue_key
+from .input_sanitizer import (
+    REJECTION_MESSAGE,
+    has_dangerous_patterns,
+    sanitize_input,
+    validate_jira_issue_key,
+)
 from .openhands_client import OpenHandsClient
 from .prompt_renderer import render_prompt
 
@@ -365,34 +371,54 @@ class JiraAutomationService:
         token_usage_endpoint = f'{base_url}/api/v1/jira/start/token-usage'
 
         # ── Input sanitization (Layer 1) ────────────────────────────
-        # Sanitize all user-controlled text fields before template rendering
+        # Check all user-controlled text fields for dangerous patterns
         validated_issue_key = (
             issue_key if validate_jira_issue_key(issue_key) else 'INVALID-KEY'
         )
-        safe_summary = sanitize_input(summary, field_name='jira_summary')
-        safe_description = sanitize_input(
-            issue_data['description'], field_name='jira_description'
-        )
-        safe_issue_type = sanitize_input(
-            issue_data['issue_type'], field_name='jira_issue_type'
-        )
-        safe_priority = sanitize_input(
-            issue_data['priority'], field_name='jira_priority'
-        )
-        safe_reporter = sanitize_input(
-            issue_data['reporter'], field_name='jira_reporter'
-        )
+        for field_name, field_value in [
+            ('jira_summary', summary),
+            ('jira_description', issue_data['description']),
+            ('jira_issue_type', issue_data['issue_type']),
+            ('jira_priority', issue_data['priority']),
+            ('jira_reporter', issue_data['reporter']),
+        ]:
+            is_dangerous, labels = has_dangerous_patterns(field_value, field_name)
+            if is_dangerous:
+                logger.warning(
+                    '[Security] Rejecting Jira issue %s due to dangerous '
+                    'patterns in %s: %s',
+                    issue_key, field_name, labels,
+                )
+                add_comment(
+                    issue_key,
+                    REJECTION_MESSAGE,
+                )
+                await self.execution_service.transition_state(
+                    execution_id,
+                    ExecutionState.FAILED,
+                    error_message=(
+                        f'Issue rejected: dangerous patterns in '
+                        f'{field_name} ({", ".join(labels)})'
+                    ),
+                )
+                return {
+                    'status': 'rejected',
+                    'execution_id': execution_id,
+                    'issue_key': issue_key,
+                    'repository': primary_repository,
+                    'reason': f'Issue contains dangerous patterns in {field_name}',
+                }
 
         # Build prompt from template with full context
         # Include all other repos for potential cloning
         prompt = render_prompt(
             'jira_new_conversation.j2',
             issue_key=validated_issue_key,
-            title=safe_summary,
-            issue_type=safe_issue_type,
-            priority=safe_priority,
-            reporter=safe_reporter,
-            description=safe_description,
+            title=summary,
+            issue_type=issue_data['issue_type'],
+            priority=issue_data['priority'],
+            reporter=issue_data['reporter'],
+            description=issue_data['description'],
             repository=primary_repository,
             repo_label=primary_label,
             default_branch=default_branch,

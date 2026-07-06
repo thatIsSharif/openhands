@@ -27,7 +27,11 @@ from openhands.app_server.automation.execution_service import (
     ExecutionService,
 )
 from openhands.app_server.automation.execution_store import ExecutionStore
-from openhands.app_server.automation.input_sanitizer import sanitize_input
+from openhands.app_server.automation.input_sanitizer import (
+    REJECTION_MESSAGE,
+    has_dangerous_patterns,
+    sanitize_input,
+)
 from openhands.app_server.automation.jira_automation_service import (
     JiraAutomationService,
     verify_jira_signature,
@@ -305,15 +309,23 @@ async def _handle_comment_created(
             token_usage_url = f'{base_url}/api/v1/jira/start/token-usage'
 
             # ── Input sanitization (Layer 1) ────────────────────────
-            safe_comment_body = sanitize_input(
+            is_dangerous, labels = has_dangerous_patterns(
                 comment_body, field_name='jira_existing_comment'
             )
+            if is_dangerous:
+                logger.warning(
+                    '[Security] Rejecting comment on %s (existing conversation): '
+                    'dangerous patterns=%s',
+                    issue_key, labels,
+                )
+                add_comment(issue_key, REJECTION_MESSAGE)
+                return True
 
             # Render the message from the existing-conversation template
             message_text = render_prompt(
                 'jira_existing_conversation.j2',
                 issue_key=issue_key,
-                comment_body=safe_comment_body,
+                comment_body=comment_body,
                 token_usage_url=token_usage_url,
             )
 

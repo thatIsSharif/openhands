@@ -16,10 +16,12 @@ from dataclasses import dataclass
 
 from openhands.app_server.utils.logger import openhands_logger as logger
 
+from openhands.app_server.utils.github import add_pr_comment
+
 from .correlation import build_log_context
 from .execution_models import ExecutionState, SourceType
 from .execution_service import ExecutionService
-from .input_sanitizer import sanitize_input
+from .input_sanitizer import REJECTION_MESSAGE, has_dangerous_patterns, sanitize_input
 from .openhands_client import OpenHandsClient
 from .prompt_renderer import render_prompt
 
@@ -253,18 +255,37 @@ class GitHubAutomationService:
         comment_endpoint = f'{base_url}/api/v1/git/github/webhook/comment'
 
         # ── Input sanitization (Layer 1) ────────────────────────────
-        safe_review_comment = sanitize_input(
+        # Check the review comment (the main user-controlled text field)
+        is_dangerous, labels = has_dangerous_patterns(
             review_comment, field_name='github_review_comment'
         )
-        safe_reviewer = sanitize_input(reviewer, field_name='github_reviewer')
+        if is_dangerous:
+            logger.warning(
+                '[Security] Rejecting GitHub review comment on %s PR #%d '
+                'by %s: dangerous patterns=%s',
+                repository, pr_number, reviewer, labels,
+            )
+            add_pr_comment(repository, pr_number, REJECTION_MESSAGE)
+            await self.execution_service.transition_state(
+                execution_id,
+                ExecutionState.FAILED,
+                error_message=f'Review comment rejected: dangerous patterns ({", ".join(labels)})',
+            )
+            return {
+                'status': 'rejected',
+                'execution_id': execution_id,
+                'pr_number': pr_number,
+                'repository': repository,
+                'reason': 'Review comment contains dangerous patterns',
+            }
 
         # Build prompt for the agent
         prompt = render_prompt(
             'github_review_conversation.j2',
             pr_number=pr_number,
             repository=repository,
-            reviewer=safe_reviewer,
-            review_comment=safe_review_comment,
+            reviewer=reviewer,
+            review_comment=review_comment,
             branch=branch,
             comment_endpoint=comment_endpoint,
         )
@@ -387,12 +408,32 @@ class GitHubAutomationService:
         comment_endpoint = f'{base_url}/api/v1/git/github/webhook/comment'
 
         # ── Input sanitization (Layer 1) ────────────────────────────
-        safe_review_comment = sanitize_input(
+        # Check the review comment (the main user-controlled text field)
+        is_dangerous, labels = has_dangerous_patterns(
             review_comment, field_name='github_review_submitted_comment'
         )
-        safe_reviewer = sanitize_input(
-            reviewer, field_name='github_review_submitted_reviewer'
-        )
+        if is_dangerous:
+            logger.warning(
+                '[Security] Rejecting GitHub review submitted on %s PR #%d '
+                'by %s: dangerous patterns=%s',
+                repository, pr_number, reviewer, labels,
+            )
+            add_pr_comment(repository, pr_number, REJECTION_MESSAGE)
+            await self.execution_service.transition_state(
+                execution_id,
+                ExecutionState.FAILED,
+                error_message=(
+                    'Review submitted comment rejected: '
+                    f'dangerous patterns ({", ".join(labels)})'
+                ),
+            )
+            return {
+                'status': 'rejected',
+                'execution_id': execution_id,
+                'pr_number': pr_number,
+                'repository': repository,
+                'reason': 'Review submitted comment contains dangerous patterns',
+            }
 
         # Build prompt for the agent
         state_desc = {
@@ -404,9 +445,9 @@ class GitHubAutomationService:
             'github_review_submitted_conversation.j2',
             pr_number=pr_number,
             repository=repository,
-            reviewer=safe_reviewer,
+            reviewer=reviewer,
             review_state=review_state,
-            review_comment=safe_review_comment,
+            review_comment=review_comment,
             branch=branch,
             comment_endpoint=comment_endpoint,
         )
