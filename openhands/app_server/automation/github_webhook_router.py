@@ -32,9 +32,8 @@ from openhands.app_server.automation.github_automation_service import (
     verify_github_signature,
 )
 from openhands.app_server.automation.input_sanitizer import (
-    REJECTION_MESSAGE,
+    build_rejection_message,
     has_dangerous_patterns,
-    sanitize_input,
 )
 from openhands.app_server.automation.openhands_client import (
     OpenHandsClient,
@@ -407,7 +406,7 @@ async def _process_github_review_submitted(
                     full_name, pr_number, reviewer, labels,
                 )
                 add_pr_comment(
-                    full_name, pr_number, REJECTION_MESSAGE,
+                    full_name, pr_number, build_rejection_message(review_comment),
                 )
                 return
 

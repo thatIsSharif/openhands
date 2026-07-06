@@ -20,6 +20,8 @@ from __future__ import annotations
 import logging
 import re
 
+from .constants import REJECTION_MESSAGE
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -278,14 +280,21 @@ _INJECTION_PATTERNS: list[tuple[re.Pattern[str], str]] = [
 
 _SANITIZED_REPLACEMENT = ' [REMOVED] '
 
-REJECTION_MESSAGE = (
-    '🚨 **Security Alert**: Your input was rejected by Layer 1 security '
-    'because it contains potentially dangerous patterns (prompt injection, '
-    'jailbreak attempts, or dangerous commands).\n\n'
-    'This conversation will not be processed. Please remove any suspicious '
-    'content and try again.'
-)
+def build_rejection_message(text: str, max_length: int = 500) -> str:
+    """Build a rejection message that includes the flagged text.
 
+    Args:
+        text: The text that triggered the security rejection.
+        max_length: Maximum length of the flagged text to include (truncated
+            with ``...`` if longer).
+
+    Returns:
+        A formatted rejection message with the flagged text appended.
+    """
+    truncated = text.strip() if text else ''
+    if len(truncated) > max_length:
+        truncated = truncated[:max_length] + '...'
+    return REJECTION_MESSAGE + f'\n\n**Flagged content:**\n```\n{truncated}\n```'
 
 def sanitize_input(text: str, field_name: str = 'unknown') -> str:
     """Sanitize input text by stripping injection patterns.

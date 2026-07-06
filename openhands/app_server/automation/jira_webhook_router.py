@@ -28,9 +28,8 @@ from openhands.app_server.automation.execution_service import (
 )
 from openhands.app_server.automation.execution_store import ExecutionStore
 from openhands.app_server.automation.input_sanitizer import (
-    REJECTION_MESSAGE,
+    build_rejection_message,
     has_dangerous_patterns,
-    sanitize_input,
 )
 from openhands.app_server.automation.jira_automation_service import (
     JiraAutomationService,
@@ -318,7 +317,7 @@ async def _handle_comment_created(
                     'dangerous patterns=%s',
                     issue_key, labels,
                 )
-                add_comment(issue_key, REJECTION_MESSAGE)
+                add_comment(issue_key, build_rejection_message(comment_body))
                 return True
 
             # Render the message from the existing-conversation template

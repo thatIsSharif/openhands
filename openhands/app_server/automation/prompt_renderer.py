@@ -12,9 +12,7 @@ from __future__ import annotations
 
 from jinja2 import Environment, FileSystemLoader
 
-_AUTOMATION_TEMPLATES_DIR = (
-    'openhands/app_server/integrations/templates/resolver/automation'
-)
+from .constants import AUTOMATION_TEMPLATES_DIR as _AUTOMATION_TEMPLATES_DIR
 
 _jinja_env: Environment | None = None
 
