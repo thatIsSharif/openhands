@@ -46,6 +46,7 @@ class OpenHandsClient:
         pr_number: int | None = None,
         repository: str | None = None,
         branch: str | None = None,
+        llm_model: str | None = None,
     ) -> str | None:
         # Look up execution record for task-level rate limits
         max_iterations: int | None = None
@@ -67,11 +68,9 @@ class OpenHandsClient:
         start_request = AppConversationStartRequest(
             trigger=ConversationTrigger.AUTOMATION,
             title=title,
-
             selected_repository=repository,
             selected_branch=branch or 'main',
             git_provider=ProviderType.GITHUB,
-
             initial_message=SendMessageRequest(
                 content=[
                     TextContent(
@@ -79,19 +78,17 @@ class OpenHandsClient:
                     )
                 ]
             ),
-
             max_iterations=max_iterations,
             max_budget_per_task=max_budget,
-
             processors=processors,
             jira_issue_key=jira_issue_key,
+            llm_model=llm_model,
         )
 
         async with get_app_conversation_service(
             state,
             request,
         ) as service:
-
             if service is None:
                 logger.error(
                     '[Automation] AppConversationService not available',
@@ -105,30 +102,16 @@ class OpenHandsClient:
             try:
                 conversation_id = None
 
-                async for task in service.start_app_conversation(
-                    start_request
-                ):
+                async for task in service.start_app_conversation(start_request):
+                    logger.info(f'[Automation] Start task status: {task.status}')
 
-                    logger.info(
-                        f'[Automation] Start task status: {task.status}'
-                    )
-
-                    if (
-                        task.status
-                        == AppConversationStartTaskStatus.READY
-                    ):
-                        conversation_id = str(
-                            task.app_conversation_id
-                        )
+                    if task.status == AppConversationStartTaskStatus.READY:
+                        conversation_id = str(task.app_conversation_id)
                         break
 
-                    if (
-                        task.status
-                        == AppConversationStartTaskStatus.ERROR
-                    ):
+                    if task.status == AppConversationStartTaskStatus.ERROR:
                         logger.error(
-                            '[Automation] Conversation startup failed: '
-                            f'{task.detail}'
+                            f'[Automation] Conversation startup failed: {task.detail}'
                         )
                         return None
 
@@ -140,8 +123,7 @@ class OpenHandsClient:
                     return None
 
                 logger.info(
-                    f'[Automation] Created conversation '
-                    f'{conversation_id}',
+                    f'[Automation] Created conversation {conversation_id}',
                     extra=build_log_context(
                         execution_id=execution_id or '',
                         conversation_id=conversation_id,

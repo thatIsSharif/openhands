@@ -20,13 +20,14 @@ from dataclasses import dataclass
 from openhands.app_server.utils.jira import add_comment
 from openhands.app_server.utils.logger import openhands_logger as logger
 
+from .complexity_analyzer import ComplexityAnalyzer
+from .complexity_router import ComplexityRouter
 from .correlation import build_log_context
 from .execution_models import ExecutionState, SourceType
 from .execution_service import ExecutionService
 from .input_sanitizer import (
     REJECTION_MESSAGE,
     has_dangerous_patterns,
-    sanitize_input,
     validate_jira_issue_key,
 )
 from .openhands_client import OpenHandsClient
@@ -387,7 +388,9 @@ class JiraAutomationService:
                 logger.warning(
                     '[Security] Rejecting Jira issue %s due to dangerous '
                     'patterns in %s: %s',
-                    issue_key, field_name, labels,
+                    issue_key,
+                    field_name,
+                    labels,
                 )
                 add_comment(
                     issue_key,
@@ -408,6 +411,28 @@ class JiraAutomationService:
                     'repository': primary_repository,
                     'reason': f'Issue contains dangerous patterns in {field_name}',
                 }
+
+        # ── Complexity-based model routing ──────────────────────────
+        llm_model: str | None = None
+
+        router = ComplexityRouter.from_env()
+        if router.is_enabled:
+            analyzer = ComplexityAnalyzer.from_env()
+            result = await analyzer.analyze(issue_data)
+            if result:
+                logger.info(
+                    '[Automation] Jira %s complexity: %s (%s)',
+                    issue_key,
+                    result.complexity,
+                    result.reasoning,
+                )
+                llm_model = router.resolve(result.complexity)
+            else:
+                logger.warning(
+                    '[Automation] Complexity analysis failed for %s, '
+                    'using default model',
+                    issue_key,
+                )
 
         # Build prompt from template with full context
         # Include all other repos for potential cloning
@@ -438,6 +463,7 @@ class JiraAutomationService:
             jira_issue_key=issue_key,
             repository=primary_repository,
             branch=default_branch,
+            llm_model=llm_model,
         )
 
         if conversation_id:
