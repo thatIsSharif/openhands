@@ -286,81 +286,29 @@ REJECTION_MESSAGE = (
     'content and try again.'
 )
 
-# ---------------------------------------------------------------------------
-# Dangerous command patterns — for Layer 2 runtime command enforcement
-# ---------------------------------------------------------------------------
+# Layer 2 command enforcement reuses ``_INJECTION_PATTERNS`` entries whose
+# label starts with ``dangerous_`` — no separate pattern list needed.
+# The ``block_dangerous.sh`` PreToolUse hook (injected via ``hook_files.py``)
+# blocks commands at the runtime level before execution; the
+# ``CommandEnforcementProcessor`` handles post-hoc notification (posting
+# a comment to GitHub/Jira and stopping the conversation).
 
-_DANGEROUS_COMMAND_PATTERNS: list[tuple[re.Pattern[str], str]] = [
-    # git push --force variants
-    (
-        re.compile(
-            r'\bgit\s+push\s+.*?(?:--force|-f)\b',
-            re.IGNORECASE,
-        ),
-        'dangerous_git_push',
-    ),
-    # git reset --hard
-    (
-        re.compile(r'\bgit\s+reset\s+--hard\b', re.IGNORECASE),
-        'dangerous_git_reset_hard',
-    ),
-    # git merge main/master
-    (
-        re.compile(r'\bgit\s+merge\s+(?:main|master)\b', re.IGNORECASE),
-        'dangerous_git_merge_main',
-    ),
-    # rm -rf on root or system dirs
-    (
-        re.compile(
-            r'\brm\s+(?:-[rf]+\s+|\s+).*?(?:\/|\.\s+|\.$|\/etc|\/usr|\/var|\/home|\/root|\/opt)',
-            re.IGNORECASE,
-        ),
-        'dangerous_rm_rf',
-    ),
-    # DROP DATABASE / TABLE / SCHEMA
-    (
-        re.compile(r'\bDROP\s+(?:DATABASE|TABLE|SCHEMA)\b', re.IGNORECASE),
-        'dangerous_drop_db',
-    ),
-    # DELETE FROM without WHERE
-    (
-        re.compile(r'\bDELETE\s+FROM\b(?!.*\bWHERE\b)', re.IGNORECASE),
-        'dangerous_delete_no_where',
-    ),
-    # TRUNCATE
-    (
-        re.compile(r'\bTRUNCATE\b', re.IGNORECASE),
-        'dangerous_truncate',
-    ),
-    # mkfs (filesystem creation)
-    (
-        re.compile(r'\bmkfs\b', re.IGNORECASE),
-        'dangerous_mkfs',
-    ),
-    # dd (disk operations)
-    (
-        re.compile(r'\bdd\b.{0,50}(?:of=|if=)', re.IGNORECASE),
-        'dangerous_dd',
-    ),
-    # chmod -R 000 (remove all permissions)
-    (
-        re.compile(r'\bchmod\s+-R\s+0{3,4}\b', re.IGNORECASE),
-        'dangerous_chmod',
-    ),
-    # find / -delete (mass deletion)
-    (
-        re.compile(r'\bfind\s+/\s+-type\s+[fd]\s+-delete\b', re.IGNORECASE),
-        'dangerous_find_delete',
-    ),
-]
+
+def _is_command_pattern(label: str) -> bool:
+    """Check if an injection pattern label represents a dangerous command.
+
+    Only patterns with labels starting with ``dangerous_`` are applicable
+    to Layer 2 command enforcement.
+    """
+    return label.startswith('dangerous_')
 
 
 def has_dangerous_command(command: str) -> tuple[bool, str | None]:
     """Check if a shell command contains dangerous operations.
 
-    Layer 2 detection: scans a shell command string for operations that
-    could be destructive or dangerous (e.g. force-pushing to git, deleting
-    files, dropping databases).
+    Layer 2 detection: reuses the ``dangerous_*`` entries from
+    ``_INJECTION_PATTERNS`` to scan for destructive operations
+    (e.g. force-pushing to git, deleting files, dropping databases).
 
     Args:
         command: The shell command string to check.
@@ -373,7 +321,9 @@ def has_dangerous_command(command: str) -> tuple[bool, str | None]:
     if not command or not isinstance(command, str):
         return False, None
 
-    for pattern, label in _DANGEROUS_COMMAND_PATTERNS:
+    for pattern, label in _INJECTION_PATTERNS:
+        if not _is_command_pattern(label):
+            continue
         if pattern.search(command):
             logger.warning(
                 '[Security] Dangerous command detected (Layer 2): '

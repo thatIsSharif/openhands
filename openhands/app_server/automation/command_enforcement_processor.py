@@ -1,10 +1,15 @@
 """Command enforcement processor for automation conversations.
 
-Layer 2 security: monitors agent terminal commands at runtime and
-interrupts the conversation if a dangerous command is detected.
-When a dangerous command is identified, the conversation is stopped
-and a security alert comment is posted back to the source
+Layer 2 security: monitors agent terminal commands via ActionEvent
+callbacks and interrupts the conversation if a dangerous command is
+detected. When a dangerous command is identified, the conversation is
+stopped and a security alert comment is posted back to the source
 (GitHub PR or Jira issue).
+
+Works alongside the ``block_dangerous.sh`` PreToolUse hook (injected via
+``hook_files.py``) which blocks commands at the runtime level *before*
+execution. This processor handles the post-hoc notification layer:
+posting a comment to GitHub/Jira and stopping the conversation.
 """
 
 from __future__ import annotations
@@ -48,11 +53,16 @@ class CommandEnforcementProcessor(EventCallbackProcessor):
 
     Registered on automation-triggered conversations. Listens for
     ActionEvent with tool_name='terminal', checks the command against
-    known dangerous patterns (git push --force, rm -rf /, DROP DATABASE,
-    etc.), and interrupts the conversation if a match is found.
+    the ``dangerous_*`` patterns in ``_INJECTION_PATTERNS``
+    (git push --force, rm -rf /, DROP DATABASE, etc.), and interrupts
+    the conversation if a match is found.
 
     After interrupting, posts a security alert comment back to the source
     (GitHub PR or Jira issue) explaining which command was blocked.
+
+    The companion ``block_dangerous.sh`` PreToolUse hook (see
+    ``hook_files.py``) blocks commands at the runtime level *before*
+    execution. This processor provides the post-hoc notification layer.
     """
 
     event_kind: ClassVar[EventKind] = 'ActionEvent'
