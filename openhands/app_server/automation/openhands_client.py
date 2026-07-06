@@ -19,6 +19,9 @@ from openhands.app_server.automation.budget_enforcement_processor import (
 from openhands.app_server.automation.callback_processors import (
     AutomationEventCallbackProcessor,
 )
+from openhands.app_server.automation.command_enforcement_processor import (
+    CommandEnforcementProcessor,
+)
 from openhands.app_server.automation.execution_store import ExecutionStore
 from openhands.app_server.config import (
     get_app_conversation_service,
@@ -58,7 +61,10 @@ class OpenHandsClient:
                 max_budget = execution_record.max_budget
 
         # Build the processor list
-        processors = [AutomationEventCallbackProcessor()]
+        processors = [
+            AutomationEventCallbackProcessor(),
+            CommandEnforcementProcessor(),
+        ]
 
         # Register budget enforcement if a max_budget is configured
         if max_budget is not None and max_budget > 0:

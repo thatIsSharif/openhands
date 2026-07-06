@@ -286,6 +286,105 @@ REJECTION_MESSAGE = (
     'content and try again.'
 )
 
+# ---------------------------------------------------------------------------
+# Dangerous command patterns — for Layer 2 runtime command enforcement
+# ---------------------------------------------------------------------------
+
+_DANGEROUS_COMMAND_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    # git push --force variants
+    (
+        re.compile(
+            r'\bgit\s+push\s+.*?(?:--force|-f)\b',
+            re.IGNORECASE,
+        ),
+        'dangerous_git_push',
+    ),
+    # git reset --hard
+    (
+        re.compile(r'\bgit\s+reset\s+--hard\b', re.IGNORECASE),
+        'dangerous_git_reset_hard',
+    ),
+    # git merge main/master
+    (
+        re.compile(r'\bgit\s+merge\s+(?:main|master)\b', re.IGNORECASE),
+        'dangerous_git_merge_main',
+    ),
+    # rm -rf on root or system dirs
+    (
+        re.compile(
+            r'\brm\s+(?:-[rf]+\s+|\s+).*?(?:\/|\.\s+|\.$|\/etc|\/usr|\/var|\/home|\/root|\/opt)',
+            re.IGNORECASE,
+        ),
+        'dangerous_rm_rf',
+    ),
+    # DROP DATABASE / TABLE / SCHEMA
+    (
+        re.compile(r'\bDROP\s+(?:DATABASE|TABLE|SCHEMA)\b', re.IGNORECASE),
+        'dangerous_drop_db',
+    ),
+    # DELETE FROM without WHERE
+    (
+        re.compile(r'\bDELETE\s+FROM\b(?!.*\bWHERE\b)', re.IGNORECASE),
+        'dangerous_delete_no_where',
+    ),
+    # TRUNCATE
+    (
+        re.compile(r'\bTRUNCATE\b', re.IGNORECASE),
+        'dangerous_truncate',
+    ),
+    # mkfs (filesystem creation)
+    (
+        re.compile(r'\bmkfs\b', re.IGNORECASE),
+        'dangerous_mkfs',
+    ),
+    # dd (disk operations)
+    (
+        re.compile(r'\bdd\b.{0,50}(?:of=|if=)', re.IGNORECASE),
+        'dangerous_dd',
+    ),
+    # chmod -R 000 (remove all permissions)
+    (
+        re.compile(r'\bchmod\s+-R\s+0{3,4}\b', re.IGNORECASE),
+        'dangerous_chmod',
+    ),
+    # find / -delete (mass deletion)
+    (
+        re.compile(r'\bfind\s+/\s+-type\s+[fd]\s+-delete\b', re.IGNORECASE),
+        'dangerous_find_delete',
+    ),
+]
+
+
+def has_dangerous_command(command: str) -> tuple[bool, str | None]:
+    """Check if a shell command contains dangerous operations.
+
+    Layer 2 detection: scans a shell command string for operations that
+    could be destructive or dangerous (e.g. force-pushing to git, deleting
+    files, dropping databases).
+
+    Args:
+        command: The shell command string to check.
+
+    Returns:
+        A tuple of ``(is_dangerous, matched_label)`` where ``is_dangerous``
+        is ``True`` if a dangerous pattern was found, and ``matched_label``
+        is the pattern label or ``None``.
+    """
+    if not command or not isinstance(command, str):
+        return False, None
+
+    for pattern, label in _DANGEROUS_COMMAND_PATTERNS:
+        if pattern.search(command):
+            logger.warning(
+                '[Security] Dangerous command detected (Layer 2): '
+                'pattern=%s command=%r',
+                label,
+                command[:200],
+            )
+            return True, label
+
+    return False, None
+
 
 def sanitize_input(text: str, field_name: str = 'unknown') -> str:
     """Sanitize input text by stripping injection patterns.
