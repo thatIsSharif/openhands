@@ -1,0 +1,17 @@
+Classify this Jira issue's complexity for a software engineering AI agent.
+
+COMPLEX — Architectural decisions, 3+ files/modules, schema changes, API
+  design, auth, cross-service coordination, high ambiguity.
+MEDIUM — 2-3 files, moderate logic, business logic, tests, config changes.
+  Requirements are reasonably clear.
+LOW — Single-file change, simple bug fix, typo/formatting, minor config,
+  documentation, dependency bump. Requirements are unambiguous.
+
+Jira Issue:
+  Key: {{ issue_key }}
+  Type: {{ issue_type }}
+  Priority: {{ priority }}
+  Summary: {{ summary }}
+  Description: {{ description }}
+
+Return ONLY ONE WORD: complex, medium, or low.

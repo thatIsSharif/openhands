@@ -23,6 +23,7 @@ from fastapi import APIRouter, BackgroundTasks, Request
 from pydantic import BaseModel
 
 from openhands.agent_server.models import OpenHandsModel
+from openhands.app_server.automation.constants import REJECTION_MESSAGE
 from openhands.app_server.automation.execution_service import (
     ExecutionService,
 )
@@ -32,9 +33,7 @@ from openhands.app_server.automation.github_automation_service import (
     verify_github_signature,
 )
 from openhands.app_server.automation.input_sanitizer import (
-    REJECTION_MESSAGE,
     has_dangerous_patterns,
-    sanitize_input,
 )
 from openhands.app_server.automation.openhands_client import (
     OpenHandsClient,

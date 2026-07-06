@@ -21,26 +21,9 @@ with warnings.catch_warnings():
 
 from openhands.app_server.utils.logger import openhands_logger as logger
 
+from .prompt_renderer import render_prompt
+
 ComplexityTier = Literal['complex', 'medium', 'low']
-
-ANALYSIS_PROMPT = """\
-Classify this Jira issue's complexity for a software engineering AI agent.
-
-COMPLEX — Architectural decisions, 3+ files/modules, schema changes, API
-  design, auth, cross-service coordination, high ambiguity.
-MEDIUM — 2-3 files, moderate logic, business logic, tests, config changes.
-  Requirements are reasonably clear.
-LOW — Single-file change, simple bug fix, typo/formatting, minor config,
-  documentation, dependency bump. Requirements are unambiguous.
-
-Jira Issue:
-  Key: {issue_key}
-  Type: {issue_type}
-  Priority: {priority}
-  Summary: {summary}
-  Description: {description}
-
-Return ONLY ONE WORD: complex, medium, or low."""
 
 
 @dataclass(frozen=True)
@@ -74,7 +57,8 @@ class ComplexityAnalyzer:
         Returns ``None`` on any failure so callers can safely fall back to
         the default model.
         """
-        prompt = ANALYSIS_PROMPT.format(
+        prompt = render_prompt(
+            'complexity_analysis.j2',
             issue_key=issue_data.get('issue_key', ''),
             issue_type=issue_data.get('issue_type', ''),
             priority=issue_data.get('priority', ''),
