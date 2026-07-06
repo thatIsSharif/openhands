@@ -24,21 +24,14 @@ from openhands.app_server.utils.logger import openhands_logger as logger
 ComplexityTier = Literal['complex', 'medium', 'low']
 
 ANALYSIS_PROMPT = """\
-You are a task complexity classifier for a software engineering AI agent.
-Analyze the following Jira issue and classify its complexity.
+Classify this Jira issue's complexity for a software engineering AI agent.
 
-Classification guidelines:
-
-COMPLEX — Requires architectural decisions, spans 3+ files/modules,
-  involves database schema changes, API design, authentication/authorization,
-  or cross-service coordination. High ambiguity in requirements.
-
-MEDIUM — Requires changes across 2-3 files, moderate logic changes,
-  involves business logic updates, test additions, or configuration changes.
+COMPLEX — Architectural decisions, 3+ files/modules, schema changes, API
+  design, auth, cross-service coordination, high ambiguity.
+MEDIUM — 2-3 files, moderate logic, business logic, tests, config changes.
   Requirements are reasonably clear.
-
-LOW — Single-file change, simple bug fix, typo/formatting, minor config
-  update, documentation, or dependency bump. Requirements are unambiguous.
+LOW — Single-file change, simple bug fix, typo/formatting, minor config,
+  documentation, dependency bump. Requirements are unambiguous.
 
 Jira Issue:
   Key: {issue_key}
@@ -47,8 +40,7 @@ Jira Issue:
   Summary: {summary}
   Description: {description}
 
-Respond with a JSON object:
-  {{"complexity": "complex|medium|low", "reasoning": "brief explanation"}}"""
+Return ONLY ONE WORD: complex, medium, or low."""
 
 
 @dataclass(frozen=True)
@@ -91,7 +83,7 @@ class ComplexityAnalyzer:
         kwargs: dict = {
             'model': self.model,
             'messages': [{'role': 'user', 'content': prompt}],
-            'max_tokens': 500,
+            'max_tokens': 50,
             'timeout': self.timeout,
         }
         if self.api_key:
@@ -117,29 +109,36 @@ class ComplexityAnalyzer:
 
     @staticmethod
     def _parse_response(content: str) -> ComplexityResult | None:
-        """Extract a JSON object from *content* and build a result."""
-        # Strip markdown code fences if present
-        cleaned = re.sub(r'^```(?:json)?\s*', '', content.strip())
-        cleaned = re.sub(r'\s*```$', '', cleaned)
+        """Extract a complexity tier from *content*.
 
+        Tries JSON first (backward compatible), then falls back to finding
+        the first occurrence of ``complex``, ``medium``, or ``low`` in the text.
+        """
+        cleaned = content.strip().lower()
+
+        # Try JSON first (supports old prompt format)
         try:
-            data = json.loads(cleaned)
-        except json.JSONDecodeError:
-            logger.warning(
-                '[ComplexityAnalyzer] Failed to parse LLM response as JSON: %s',
-                content[:200],
-            )
-            return None
+            # Strip markdown code fences if present
+            stripped = re.sub(r'^```(?:json)?\s*', '', cleaned)
+            stripped = re.sub(r'\s*```$', '', stripped)
+            data = json.loads(stripped)
+            complexity = data.get('complexity', '').lower().strip()
+            if complexity in ('complex', 'medium', 'low'):
+                return ComplexityResult(
+                    complexity=complexity,  # type: ignore[arg-type]
+                    reasoning=data.get('reasoning', ''),
+                )
+        except (json.JSONDecodeError, TypeError):
+            pass
 
-        complexity = data.get('complexity', '').lower().strip()
-        if complexity not in ('complex', 'medium', 'low'):
-            logger.warning(
-                '[ComplexityAnalyzer] Unknown complexity tier: %r',
-                complexity,
-            )
-            return None
+        # Fallback: scan for the first complexity word in the text.
+        # Use word-boundary match so "low" doesn't match "below"/"follow"/"allow".
+        for tier in ('complex', 'medium', 'low'):
+            if re.search(rf'\b{re.escape(tier)}\b', cleaned):
+                return ComplexityResult(complexity=tier, reasoning=content[:200])
 
-        return ComplexityResult(
-            complexity=complexity,  # type: ignore[arg-type]
-            reasoning=data.get('reasoning', ''),
+        logger.warning(
+            '[ComplexityAnalyzer] No complexity tier found in response: %s',
+            content[:200],
         )
+        return None

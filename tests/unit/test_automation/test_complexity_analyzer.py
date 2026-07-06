@@ -29,6 +29,8 @@ def _make_response(content: str) -> MagicMock:
 
 
 class TestComplexityAnalyzerParseResponse:
+    # ── JSON responses (backward compatible) ──────────────────────
+
     def test_parses_complex_json(self):
         data = {'complexity': 'complex', 'reasoning': 'spans many services'}
         result = ComplexityAnalyzer._parse_response(json.dumps(data))
@@ -42,13 +44,43 @@ class TestComplexityAnalyzerParseResponse:
         result = ComplexityAnalyzer._parse_response(raw)
         assert result == ComplexityResult(complexity='medium', reasoning='2 files')
 
-    def test_returns_none_for_invalid_json(self):
-        result = ComplexityAnalyzer._parse_response('not json at all')
-        assert result is None
-
-    def test_returns_none_for_unknown_tier(self):
+    def test_returns_none_for_json_unknown_tier(self):
         data = {'complexity': 'super-hard', 'reasoning': '...'}
         result = ComplexityAnalyzer._parse_response(json.dumps(data))
+        assert result is None
+
+    # ── Plain-text fallback ──────────────────────────────────────
+
+    def test_extracts_complex_from_text(self):
+        result = ComplexityAnalyzer._parse_response(
+            'This task requires complex changes across the system.'
+        )
+        assert result is not None
+        assert result.complexity == 'complex'
+
+    def test_extracts_medium_from_text(self):
+        result = ComplexityAnalyzer._parse_response('medium')
+        assert result is not None
+        assert result.complexity == 'medium'
+
+    def test_extracts_low_from_text(self):
+        result = ComplexityAnalyzer._parse_response('The complexity is low')
+        assert result is not None
+        assert result.complexity == 'low'
+
+    def test_low_word_boundary_excludes_below(self):
+        """``below`` must NOT match ``low``."""
+        result = ComplexityAnalyzer._parse_response('see below for details')
+        assert result is None
+
+    def test_complex_matches_first(self):
+        """When multiple tiers appear, the first in order wins."""
+        result = ComplexityAnalyzer._parse_response('low medium complex')
+        assert result is not None
+        assert result.complexity == 'complex'
+
+    def test_returns_none_for_unrelated_text(self):
+        result = ComplexityAnalyzer._parse_response('not json at all')
         assert result is None
 
     def test_returns_none_for_empty_content(self):
@@ -71,6 +103,21 @@ class TestComplexityAnalyzerAnalyze:
             )
             result = await analyzer.analyze(_ISSUE_DATA)
             assert result == ComplexityResult(complexity='low', reasoning='simple typo')
+
+    async def test_analyze_plain_text_response(self):
+        """LLM returns a plain word — fallback parsing extracts it."""
+        with patch(
+            'openhands.app_server.automation.complexity_analyzer.litellm.acompletion',
+            new_callable=AsyncMock,
+            return_value=_make_response('medium'),
+        ):
+            analyzer = ComplexityAnalyzer(
+                api_key='test-key',
+                base_url='https://opencode.ai/zen/go/v1',
+            )
+            result = await analyzer.analyze(_ISSUE_DATA)
+            assert result is not None
+            assert result.complexity == 'medium'
 
     async def test_analyze_returns_none_on_llm_failure(self):
         with patch(
@@ -115,5 +162,5 @@ class TestComplexityAnalyzerAnalyze:
             assert call_kwargs['api_key'] == 'sk-abc'
             assert call_kwargs['api_base'] == 'https://gateway.example.com/v1'
             assert call_kwargs['model'] == 'openai/deepseek-v4-flash-free'
-            assert call_kwargs['max_tokens'] == 500
+            assert call_kwargs['max_tokens'] == 50
             assert call_kwargs['timeout'] == 15
