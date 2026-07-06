@@ -1,8 +1,12 @@
 """Input sanitization for automation platform prompts.
 
-Layer 1 security: sanitize user-controlled text fields before they are
-rendered into Jinja2 templates for LLM prompts. Prevents prompt injection,
-template injection, and jailbreak attempts.
+Layer 1 security: detect dangerous patterns in user-controlled text fields
+before they are rendered into Jinja2 templates for LLM prompts. Prevents
+prompt injection, template injection, and jailbreak attempts.
+
+When dangerous patterns are detected, the conversation is stopped (not created)
+and a security alert comment is posted back to the source (GitHub PR or Jira
+issue) using the existing comment-posting API endpoints.
 
 Applied to ALL 4 automation entry points:
 1. JIRA issue_created → jira_new_conversation.j2
@@ -274,6 +278,14 @@ _INJECTION_PATTERNS: list[tuple[re.Pattern[str], str]] = [
 
 _SANITIZED_REPLACEMENT = ' [REMOVED] '
 
+REJECTION_MESSAGE = (
+    '🚨 **Security Alert**: Your input was rejected by Layer 1 security '
+    'because it contains potentially dangerous patterns (prompt injection, '
+    'jailbreak attempts, or dangerous commands).\n\n'
+    'This conversation will not be processed. Please remove any suspicious '
+    'content and try again.'
+)
+
 
 def sanitize_input(text: str, field_name: str = 'unknown') -> str:
     """Sanitize input text by stripping injection patterns.
@@ -281,6 +293,9 @@ def sanitize_input(text: str, field_name: str = 'unknown') -> str:
     Scans the text for known injection, jailbreak, and template-injection
     patterns. When a match is found, the matching span is replaced with a
     safe marker and the event is logged.
+
+    Note: This function is kept for backward compatibility. New code should
+    prefer ``has_dangerous_patterns()`` to check input and reject early.
 
     Args:
         text: The input text to sanitize.
@@ -313,3 +328,49 @@ def sanitize_input(text: str, field_name: str = 'unknown') -> str:
             )
 
     return sanitized
+
+
+def has_dangerous_patterns(
+    text: str, field_name: str = 'unknown'
+) -> tuple[bool, list[str]]:
+    """Check if text contains dangerous injection/jailbreak patterns.
+
+    Scans the text for known injection, jailbreak, and template-injection
+    patterns. Intended to be called before processing input — if dangerous
+    patterns are found the caller should reject the input, post a security
+    alert comment back to the source (GitHub PR / Jira issue), and stop
+    processing.
+
+    Args:
+        text: The input text to check.
+        field_name: A human-readable label for the field being checked
+            (used in log messages).
+
+    Returns:
+        A tuple of ``(has_danger, matched_labels)`` where ``has_danger`` is
+        ``True`` if dangerous patterns were found, and ``matched_labels`` is
+        a list of pattern labels that matched (e.g. ``['jailbreak_dan',
+        'instruction_override']``).
+    """
+    if not text or not isinstance(text, str):
+        return False, []
+
+    matched_labels: list[str] = []
+    for pattern, label in _INJECTION_PATTERNS:
+        if pattern.search(text):
+            matched_labels.append(label)
+            logger.warning(
+                '[Security] Dangerous pattern detected: field=%s pattern=%s',
+                field_name,
+                label,
+            )
+
+    if matched_labels:
+        logger.warning(
+            '[Security] Input blocked due to dangerous patterns: '
+            'field=%s patterns=%s',
+            field_name,
+            matched_labels,
+        )
+
+    return len(matched_labels) > 0, matched_labels

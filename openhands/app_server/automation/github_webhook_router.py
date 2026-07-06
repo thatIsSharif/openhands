@@ -31,7 +31,11 @@ from openhands.app_server.automation.github_automation_service import (
     GitHubAutomationService,
     verify_github_signature,
 )
-from openhands.app_server.automation.input_sanitizer import sanitize_input
+from openhands.app_server.automation.input_sanitizer import (
+    REJECTION_MESSAGE,
+    has_dangerous_patterns,
+    sanitize_input,
+)
 from openhands.app_server.automation.openhands_client import (
     OpenHandsClient,
 )
@@ -393,20 +397,27 @@ async def _process_github_review_submitted(
             }.get(review_state, f'📝 Review ({review_state})')
 
             # ── Input sanitization (Layer 1) ────────────────────────
-            safe_review_comment = sanitize_input(
+            is_dangerous, labels = has_dangerous_patterns(
                 review_comment, field_name='github_existing_review_comment'
             )
-            safe_reviewer = sanitize_input(
-                reviewer, field_name='github_existing_reviewer'
-            )
+            if is_dangerous:
+                logger.warning(
+                    '[Security] Rejecting review on %s PR #%d '
+                    'by %s (existing conversation): dangerous patterns=%s',
+                    full_name, pr_number, reviewer, labels,
+                )
+                add_pr_comment(
+                    full_name, pr_number, REJECTION_MESSAGE,
+                )
+                return
 
             message_text = render_prompt(
                 'github_review_submitted_existing_conversation.j2',
                 state_label=state_label,
                 full_name=full_name,
                 pr_url=pr_url,
-                reviewer=safe_reviewer,
-                review_comment=safe_review_comment,
+                reviewer=reviewer,
+                review_comment=review_comment,
             )
 
             response = await httpx_client.post(
