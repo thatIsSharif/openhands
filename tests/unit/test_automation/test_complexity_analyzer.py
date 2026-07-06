@@ -162,5 +162,6 @@ class TestComplexityAnalyzerAnalyze:
             assert call_kwargs['api_key'] == 'sk-abc'
             assert call_kwargs['api_base'] == 'https://gateway.example.com/v1'
             assert call_kwargs['model'] == 'openai/deepseek-v4-flash-free'
-            assert call_kwargs['max_tokens'] == 50
+            assert call_kwargs['max_tokens'] == 100
+            assert call_kwargs['temperature'] == 0
             assert call_kwargs['timeout'] == 15
