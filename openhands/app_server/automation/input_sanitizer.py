@@ -18,6 +18,7 @@ Applied to ALL 4 automation entry points:
 from __future__ import annotations
 
 import logging
+import pathlib
 import re
 
 logger = logging.getLogger(__name__)
@@ -286,29 +287,28 @@ REJECTION_MESSAGE = (
     'content and try again.'
 )
 
-# Layer 2 command enforcement reuses ``_INJECTION_PATTERNS`` entries whose
-# label starts with ``dangerous_`` — no separate pattern list needed.
-# The ``block_dangerous.sh`` PreToolUse hook (injected via ``hook_files.py``)
-# blocks commands at the runtime level before execution; the
-# ``CommandEnforcementProcessor`` handles post-hoc notification (posting
-# a comment to GitHub/Jira and stopping the conversation).
+# Layer 2 command enforcement delegates to ``block_dangerous.sh`` — the
+# same PreToolUse hook script that blocks commands at the runtime level
+# before execution. The ``CommandEnforcementProcessor`` handles the
+# post-hoc notification layer (posting a comment to GitHub/Jira and
+# stopping the conversation).
 
-
-def _is_command_pattern(label: str) -> bool:
-    """Check if an injection pattern label represents a dangerous command.
-
-    Only patterns with labels starting with ``dangerous_`` are applicable
-    to Layer 2 command enforcement.
-    """
-    return label.startswith('dangerous_')
+_BLOCK_DANGEROUS_SH_PATH = (
+    pathlib.Path(__file__).resolve().parent.parent.parent.parent
+    / '.openhands'
+    / 'hooks'
+    / 'block_dangerous.sh'
+)
 
 
 def has_dangerous_command(command: str) -> tuple[bool, str | None]:
-    """Check if a shell command contains dangerous operations.
+    """Check if a shell command contains dangerous operations, using
+    ``block_dangerous.sh``.
 
-    Layer 2 detection: reuses the ``dangerous_*`` entries from
-    ``_INJECTION_PATTERNS`` to scan for destructive operations
-    (e.g. force-pushing to git, deleting files, dropping databases).
+    Layer 2 detection: invokes the same ``block_dangerous.sh`` script
+    that runs as a PreToolUse hook in the sandbox, passing the command
+    in the expected JSON format on stdin. If the script exits with
+    code 2, the command is considered dangerous.
 
     Args:
         command: The shell command string to check.
@@ -316,24 +316,83 @@ def has_dangerous_command(command: str) -> tuple[bool, str | None]:
     Returns:
         A tuple of ``(is_dangerous, matched_label)`` where ``is_dangerous``
         is ``True`` if a dangerous pattern was found, and ``matched_label``
-        is the pattern label or ``None``.
+        is a short description or ``None``.
     """
     if not command or not isinstance(command, str):
         return False, None
 
-    for pattern, label in _INJECTION_PATTERNS:
-        if not _is_command_pattern(label):
-            continue
-        if pattern.search(command):
+    import json
+    import subprocess
+
+    script_path = str(_BLOCK_DANGEROUS_SH_PATH)
+
+    if not pathlib.Path(script_path).exists():
+        logger.warning(
+            '[Security] block_dangerous.sh not found at %s '
+            '(Layer 2 check skipped)',
+            script_path,
+        )
+        return False, None
+
+    stdin_payload = json.dumps({
+        'event_type': 'PreToolUse',
+        'tool_name': 'terminal',
+        'tool_input': {'command': command},
+    })
+
+    env = {
+        'OPENHANDS_EVENT_TYPE': 'PreToolUse',
+        'OPENHANDS_TOOL_NAME': 'terminal',
+    }
+
+    try:
+        result = subprocess.run(
+            ['bash', script_path],
+            input=stdin_payload,
+            capture_output=True,
+            timeout=10,
+            text=True,
+            env=env,
+        )
+
+        if result.returncode == 2:
+            # Script outputs JSON with a "reason" field when denying
+            reason = ''
+            try:
+                reason = json.loads(result.stdout).get('reason', '')
+            except (json.JSONDecodeError, ValueError):
+                reason = result.stderr.strip() or 'dangerous command blocked'
+
             logger.warning(
                 '[Security] Dangerous command detected (Layer 2): '
-                'pattern=%s command=%r',
-                label,
+                'reason=%s command=%r',
+                reason,
                 command[:200],
             )
-            return True, label
+            return True, reason or 'dangerous_command'
+        elif result.returncode == 1:
+            logger.warning(
+                '[Security] block_dangerous.sh returned error code 1 '
+                '(non-blocking) for command=%r: stderr=%s',
+                command[:200],
+                result.stderr.strip(),
+            )
 
-    return False, None
+        return False, None
+
+    except FileNotFoundError:
+        logger.warning(
+            '[Security] Could not execute block_dangerous.sh '
+            '(bash not found, Layer 2 check skipped)'
+        )
+        return False, None
+    except subprocess.TimeoutExpired:
+        logger.warning(
+            '[Security] block_dangerous.sh timed out for command=%r '
+            '(Layer 2 check skipped)',
+            command[:200],
+        )
+        return False, None
 
 
 def sanitize_input(text: str, field_name: str = 'unknown') -> str:
