@@ -20,6 +20,7 @@ from openhands.app_server.automation.callback_processors import (
     AutomationEventCallbackProcessor,
 )
 from openhands.app_server.automation.command_enforcement_processor import (
+    BlockedHookProcessor,
     CommandEnforcementProcessor,
 )
 from openhands.app_server.automation.execution_store import ExecutionStore
@@ -64,6 +65,7 @@ class OpenHandsClient:
         processors = [
             AutomationEventCallbackProcessor(),
             CommandEnforcementProcessor(),
+            BlockedHookProcessor(),
         ]
 
         # Register budget enforcement if a max_budget is configured
