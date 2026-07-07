@@ -22,11 +22,11 @@ from openhands.app_server.utils.logger import openhands_logger as logger
 
 from .complexity_analyzer import ComplexityAnalyzer
 from .complexity_router import ComplexityRouter
-from .constants import REJECTION_MESSAGE
 from .correlation import build_log_context
 from .execution_models import ExecutionState, SourceType
 from .execution_service import ExecutionService
 from .input_sanitizer import (
+    build_rejection_message,
     has_dangerous_patterns,
     validate_jira_issue_key,
 )
@@ -394,7 +394,7 @@ class JiraAutomationService:
                 )
                 add_comment(
                     issue_key,
-                    REJECTION_MESSAGE,
+                    build_rejection_message(field_value),
                 )
                 await self.execution_service.transition_state(
                     execution_id,

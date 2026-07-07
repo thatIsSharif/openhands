@@ -17,11 +17,13 @@ from dataclasses import dataclass
 from openhands.app_server.utils.github import add_pr_comment
 from openhands.app_server.utils.logger import openhands_logger as logger
 
-from .constants import REJECTION_MESSAGE
 from .correlation import build_log_context
 from .execution_models import ExecutionState, SourceType
 from .execution_service import ExecutionService
-from .input_sanitizer import has_dangerous_patterns
+from .input_sanitizer import (
+    build_rejection_message,
+    has_dangerous_patterns,
+)
 from .openhands_client import OpenHandsClient
 from .prompt_renderer import render_prompt
 
@@ -265,7 +267,7 @@ class GitHubAutomationService:
                 'by %s: dangerous patterns=%s',
                 repository, pr_number, reviewer, labels,
             )
-            add_pr_comment(repository, pr_number, REJECTION_MESSAGE)
+            add_pr_comment(repository, pr_number, build_rejection_message(review_comment))
             await self.execution_service.transition_state(
                 execution_id,
                 ExecutionState.FAILED,
@@ -418,7 +420,7 @@ class GitHubAutomationService:
                 'by %s: dangerous patterns=%s',
                 repository, pr_number, reviewer, labels,
             )
-            add_pr_comment(repository, pr_number, REJECTION_MESSAGE)
+            add_pr_comment(repository, pr_number, build_rejection_message(review_comment))
             await self.execution_service.transition_state(
                 execution_id,
                 ExecutionState.FAILED,

@@ -23,12 +23,12 @@ from fastapi import APIRouter, BackgroundTasks, Request
 from pydantic import BaseModel
 
 from openhands.agent_server.models import OpenHandsModel
-from openhands.app_server.automation.constants import REJECTION_MESSAGE
 from openhands.app_server.automation.execution_service import (
     ExecutionService,
 )
 from openhands.app_server.automation.execution_store import ExecutionStore
 from openhands.app_server.automation.input_sanitizer import (
+    build_rejection_message,
     has_dangerous_patterns,
 )
 from openhands.app_server.automation.jira_automation_service import (
@@ -317,7 +317,7 @@ async def _handle_comment_created(
                     'dangerous patterns=%s',
                     issue_key, labels,
                 )
-                add_comment(issue_key, REJECTION_MESSAGE)
+                add_comment(issue_key, build_rejection_message(comment_body))
                 return True
 
             # Render the message from the existing-conversation template
