@@ -30,8 +30,8 @@ def _load_file(name: str) -> str | None:
     return path.read_text()
 
 
-# Load block_dangerous.sh — the actual shell script that checks patterns
-BLOCK_DANGEROUS_STR: str | None = _load_file('hooks/block_dangerous.sh')
+# Load block_dangerous_commands.sh — the actual shell script that checks patterns
+BLOCK_DANGEROUS_COMMANDS_STR: str | None = _load_file('hooks/block_dangerous_commands.sh')
 
 # The hooks.json template. We build this programmatically instead of loading
 # from disk so we can inject the absolute project_dir into the command path.
@@ -55,7 +55,7 @@ def _build_hooks_json(project_dir: str) -> str:
                 "hooks": [
                     {
                         "type": "command",
-                        "command": f"bash {project_dir}/.openhands/hooks/block_dangerous.sh",
+                        "command": f"bash {project_dir}/.openhands/hooks/block_dangerous_commands.sh",
                         "timeout": 10,
                     }
                 ],
@@ -77,21 +77,21 @@ async def inject_hooks_into_sandbox(
             that runs a command in the sandbox.
         project_dir: The target repo's root directory inside the sandbox.
     """
-    if not BLOCK_DANGEROUS_STR:
+    if not BLOCK_DANGEROUS_COMMANDS_STR:
         _logger.warning(
-            'Cannot inject security hooks: block_dangerous.sh not found on disk'
+            'Cannot inject security hooks: block_dangerous_commands.sh not found on disk'
         )
         return
 
     hooks_json_str = _build_hooks_json(project_dir)
     hooks_json_b64 = base64.b64encode(hooks_json_str.encode()).decode()
-    script_b64 = base64.b64encode(BLOCK_DANGEROUS_STR.encode()).decode()
+    script_b64 = base64.b64encode(BLOCK_DANGEROUS_COMMANDS_STR.encode()).decode()
 
     cmd = (
         f'mkdir -p "{project_dir}/.openhands/hooks" && '
         f'echo "{hooks_json_b64}" | base64 -d > "{project_dir}/.openhands/hooks.json" && '
-        f'echo "{script_b64}" | base64 -d > "{project_dir}/.openhands/hooks/block_dangerous.sh" && '
-        f'chmod +x "{project_dir}/.openhands/hooks/block_dangerous.sh"'
+        f'echo "{script_b64}" | base64 -d > "{project_dir}/.openhands/hooks/block_dangerous_commands.sh" && '
+        f'chmod +x "{project_dir}/.openhands/hooks/block_dangerous_commands.sh"'
     )
 
     await execute_command(cmd, timeout=30)

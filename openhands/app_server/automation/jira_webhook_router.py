@@ -28,8 +28,8 @@ from openhands.app_server.automation.execution_service import (
 )
 from openhands.app_server.automation.execution_store import ExecutionStore
 from openhands.app_server.automation.input_sanitizer import (
-    build_rejection_message,
     has_dangerous_patterns,
+    build_rejection_message
 )
 from openhands.app_server.automation.jira_automation_service import (
     JiraAutomationService,

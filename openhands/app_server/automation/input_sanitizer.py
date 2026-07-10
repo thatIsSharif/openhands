@@ -16,11 +16,12 @@ Applied to ALL 4 automation entry points:
 """
 
 from __future__ import annotations
+from .constants import (
+    REJECTION_MESSAGE
+)
 
 import logging
 import re
-
-from .constants import REJECTION_MESSAGE
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +46,20 @@ def validate_jira_issue_key(key: str | None) -> bool:
 def validate_github_pr_number(number: int) -> bool:
     """Validate a GitHub PR/issue number is a reasonable positive integer."""
     return isinstance(number, int) and 1 <= number <= 10_000_000
+
+def build_rejection_message(text: str, max_length: int = 500) -> str:
+    """Build a rejection message that includes the flagged text.
+    Args:
+        text: The text that triggered the security rejection.
+        max_length: Maximum length of the flagged text to include (truncated
+            with ``...`` if longer).
+    Returns:
+        A formatted rejection message with the flagged text appended.
+    """
+    truncated = text.strip() if text else ''
+    if len(truncated) > max_length:
+        truncated = truncated[:max_length] + '...'
+    return REJECTION_MESSAGE + f'\n\n**Flagged content:**\n```\n{truncated}\n```'
 
 
 # ---------------------------------------------------------------------------
@@ -200,9 +215,10 @@ _INJECTION_PATTERNS: list[tuple[re.Pattern[str], str]] = [
         'instruction_override',
     ),
     # Template injection — Jinja2/ERB/Mustache
+    # {%...%} blocks: always dangerous (statement blocks with imports, etc.)
     (
-        re.compile(r'\{\{.*?\}\}|\{%.*?%\}', re.IGNORECASE),
-        'template_injection',
+        re.compile(r'\{%\s*.*?\s*%\}', re.IGNORECASE),
+        'template_injection_block',
     ),
     # "Ignore" block markers
     (
@@ -280,21 +296,6 @@ _INJECTION_PATTERNS: list[tuple[re.Pattern[str], str]] = [
 
 _SANITIZED_REPLACEMENT = ' [REMOVED] '
 
-def build_rejection_message(text: str, max_length: int = 500) -> str:
-    """Build a rejection message that includes the flagged text.
-
-    Args:
-        text: The text that triggered the security rejection.
-        max_length: Maximum length of the flagged text to include (truncated
-            with ``...`` if longer).
-
-    Returns:
-        A formatted rejection message with the flagged text appended.
-    """
-    truncated = text.strip() if text else ''
-    if len(truncated) > max_length:
-        truncated = truncated[:max_length] + '...'
-    return REJECTION_MESSAGE + f'\n\n**Flagged content:**\n```\n{truncated}\n```'
 
 def sanitize_input(text: str, field_name: str = 'unknown') -> str:
     """Sanitize input text by stripping injection patterns.

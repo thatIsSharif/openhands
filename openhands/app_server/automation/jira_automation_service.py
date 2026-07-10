@@ -26,9 +26,9 @@ from .correlation import build_log_context
 from .execution_models import ExecutionState, SourceType
 from .execution_service import ExecutionService
 from .input_sanitizer import (
-    build_rejection_message,
     has_dangerous_patterns,
     validate_jira_issue_key,
+    build_rejection_message
 )
 from .openhands_client import OpenHandsClient
 from .prompt_renderer import render_prompt
@@ -377,10 +377,10 @@ class JiraAutomationService:
             issue_key if validate_jira_issue_key(issue_key) else 'INVALID-KEY'
         )
         for field_name, field_value in [
-            ('jira_summary', summary),
-            ('jira_description', issue_data['description']),
-            ('jira_issue_type', issue_data['issue_type']),
-            ('jira_priority', issue_data['priority']),
+            # ('jira_summary', summary),
+            # ('jira_description', issue_data['description']),
+            # ('jira_issue_type', issue_data['issue_type']),
+            # ('jira_priority', issue_data['priority']),
             ('jira_reporter', issue_data['reporter']),
         ]:
             is_dangerous, labels = has_dangerous_patterns(field_value, field_name)
@@ -388,9 +388,7 @@ class JiraAutomationService:
                 logger.warning(
                     '[Security] Rejecting Jira issue %s due to dangerous '
                     'patterns in %s: %s',
-                    issue_key,
-                    field_name,
-                    labels,
+                    issue_key, field_name, labels,
                 )
                 add_comment(
                     issue_key,

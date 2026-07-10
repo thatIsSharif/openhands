@@ -28,7 +28,26 @@ RUN apt-get update -y \
 
 COPY pyproject.toml poetry.lock ./
 RUN touch README.md
-RUN export POETRY_CACHE_DIR && poetry install --no-root && rm -rf $POETRY_CACHE_DIR
+COPY pyproject.toml poetry.lock ./
+RUN touch README.md
+RUN <<EOF
+cat > /tmp/fakeuname.c << 'EOC'
+#define _GNU_SOURCE
+#include <sys/utsname.h>
+#include <string.h>
+int uname(struct utsname *buf) {
+    strcpy(buf->sysname, "Linux");
+    strcpy(buf->release, "6.1.0");
+    strcpy(buf->version, "1");
+    strcpy(buf->machine, "x86_64");
+    strcpy(buf->nodename, "docker");
+    strcpy(buf->domainname, "(none)");
+    return 0;
+}
+EOC
+gcc -shared -fPIC -o /usr/local/lib/fakeuname.so /tmp/fakeuname.c
+EOF
+RUN export POETRY_CACHE_DIR && LD_PRELOAD=/usr/local/lib/fakeuname.so poetry install --no-root && rm -rf $POETRY_CACHE_DIR
 
 FROM base AS openhands-app
 

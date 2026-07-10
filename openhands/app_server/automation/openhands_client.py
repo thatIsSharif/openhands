@@ -68,9 +68,11 @@ class OpenHandsClient:
         start_request = AppConversationStartRequest(
             trigger=ConversationTrigger.AUTOMATION,
             title=title,
+
             selected_repository=repository,
             selected_branch=branch or 'main',
             git_provider=ProviderType.GITHUB,
+
             initial_message=SendMessageRequest(
                 content=[
                     TextContent(
@@ -78,8 +80,10 @@ class OpenHandsClient:
                     )
                 ]
             ),
+
             max_iterations=max_iterations,
             max_budget_per_task=max_budget,
+
             processors=processors,
             jira_issue_key=jira_issue_key,
             llm_model=llm_model,
@@ -89,6 +93,7 @@ class OpenHandsClient:
             state,
             request,
         ) as service:
+
             if service is None:
                 logger.error(
                     '[Automation] AppConversationService not available',
@@ -102,16 +107,30 @@ class OpenHandsClient:
             try:
                 conversation_id = None
 
-                async for task in service.start_app_conversation(start_request):
-                    logger.info(f'[Automation] Start task status: {task.status}')
+                async for task in service.start_app_conversation(
+                    start_request
+                ):
 
-                    if task.status == AppConversationStartTaskStatus.READY:
-                        conversation_id = str(task.app_conversation_id)
+                    logger.info(
+                        f'[Automation] Start task status: {task.status}'
+                    )
+
+                    if (
+                        task.status
+                        == AppConversationStartTaskStatus.READY
+                    ):
+                        conversation_id = str(
+                            task.app_conversation_id
+                        )
                         break
 
-                    if task.status == AppConversationStartTaskStatus.ERROR:
+                    if (
+                        task.status
+                        == AppConversationStartTaskStatus.ERROR
+                    ):
                         logger.error(
-                            f'[Automation] Conversation startup failed: {task.detail}'
+                            '[Automation] Conversation startup failed: '
+                            f'{task.detail}'
                         )
                         return None
 
@@ -123,7 +142,8 @@ class OpenHandsClient:
                     return None
 
                 logger.info(
-                    f'[Automation] Created conversation {conversation_id}',
+                    f'[Automation] Created conversation '
+                    f'{conversation_id}',
                     extra=build_log_context(
                         execution_id=execution_id or '',
                         conversation_id=conversation_id,

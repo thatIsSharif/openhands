@@ -11,6 +11,35 @@ services:
       - AGENT_SERVER_IMAGE_TAG=${AGENT_SERVER_IMAGE_TAG:-1.28.0-python}
       #- SANDBOX_USER_ID=${SANDBOX_USER_ID:-1234} # enable this only if you want a specific non-root sandbox user but you will have to manually adjust permissions of ~/.openhands for this user
       - WORKSPACE_MOUNT_PATH=${WORKSPACE_BASE:-$PWD/workspace}
+      # Jira auth
+      - JIRA_EMAIL=${JIRA_EMAIL}
+      - JIRA_API_KEY=${JIRA_API_KEY}
+      - JIRA_DOMAIN=${JIRA_DOMAIN}
+      - JIRA_TARGET_ACCOUNT_ID=${JIRA_TARGET_ACCOUNT_ID}
+
+      # LLM routing
+      - LMNR_BASE_URL=${LMNR_BASE_URL}
+      - LMNR_HTTP_PORT=${LMNR_HTTP_PORT}
+      - LMNR_FORCE_HTTP=${LMNR_FORCE_HTTP}
+      - LMNR_PROJECT_API_KEY=${LMNR_PROJECT_API_KEY}
+
+      # Automation defaults
+      - OH_AUTOMATION_DEFAULT_MAX_BUDGET=${OH_AUTOMATION_DEFAULT_MAX_BUDGET}
+      - OH_AUTOMATION_DEFAULT_MAX_ITERATIONS=${OH_AUTOMATION_DEFAULT_MAX_ITERATIONS}
+
+      # GitHub PAT for cloning repos
+      - GITHUB_PAT_TOKEN=${GITHUB_PAT_TOKEN}
+
+      # Model selection for complexity tiers
+      - OH_JIRA_COMPLEX_MODEL=${OH_JIRA_COMPLEX_MODEL}
+      - OH_JIRA_MEDIUM_MODEL=${OH_JIRA_MEDIUM_MODEL}
+      - OH_JIRA_LOW_MODEL=${OH_JIRA_LOW_MODEL}
+
+      # Analysis LLM (separate from task LLM)
+      - OH_JIRA_ANALYSIS_MODEL=${OH_JIRA_ANALYSIS_MODEL}
+      - OH_JIRA_ANALYSIS_API_KEY=${OH_JIRA_ANALYSIS_API_KEY}
+      - OH_JIRA_ANALYSIS_BASE_URL=${OH_JIRA_ANALYSIS_BASE_URL}
+      - OH_JIRA_ANALYSIS_MAX_TOKENS=${OH_JIRA_ANALYSIS_MAX_TOKENS}
     ports:
       - "3000:3000"
     extra_hosts:

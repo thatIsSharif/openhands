@@ -18,6 +18,7 @@ Flow:
 from __future__ import annotations
 
 import traceback
+import json
 
 from fastapi import APIRouter, BackgroundTasks, Request
 from pydantic import BaseModel
@@ -31,8 +32,11 @@ from openhands.app_server.automation.github_automation_service import (
     GitHubAutomationService,
     verify_github_signature,
 )
-from openhands.app_server.automation.input_sanitizer import (
+from .input_sanitizer import (
     build_rejection_message,
+    has_dangerous_patterns,
+)
+from openhands.app_server.automation.input_sanitizer import (
     has_dangerous_patterns,
 )
 from openhands.app_server.automation.openhands_client import (
@@ -104,7 +108,7 @@ async def handle_github_webhook(
     event_type = request.headers.get('X-GitHub-Event', '')
     delivery_id = request.headers.get('X-GitHub-Delivery', '')
     body = await request.body()
-    payload = await request.json()
+    payload = json.loads(body) if body else {}
 
     logger.info(
         f'[Automation] GitHub webhook received: {event_type} (delivery: {delivery_id})',
@@ -390,10 +394,10 @@ async def _process_github_review_submitted(
 
             # Build the review message from the existing-conversation template
             state_label = {
-                'approved': '✅ Approved',
-                'changes_requested': '🔧 Changes Requested',
-                'comment': '💬 Comment',
-            }.get(review_state, f'📝 Review ({review_state})')
+                'approved': 'Approved',
+                'changes_requested': 'Changes Requested',
+                'comment': 'Comment',
+            }.get(review_state, f'Review ({review_state})')
 
             # ── Input sanitization (Layer 1) ────────────────────────
             is_dangerous, labels = has_dangerous_patterns(
@@ -405,9 +409,7 @@ async def _process_github_review_submitted(
                     'by %s (existing conversation): dangerous patterns=%s',
                     full_name, pr_number, reviewer, labels,
                 )
-                add_pr_comment(
-                    full_name, pr_number, build_rejection_message(review_comment),
-                )
+                add_pr_comment(full_name, pr_number, build_rejection_message(review_comment))
                 return
 
             message_text = render_prompt(
