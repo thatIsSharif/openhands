@@ -44,6 +44,7 @@ class OpenHandsClient:
         execution_id: str | None = None,
         jira_issue_key: str | None = None,
         pr_number: int | None = None,
+        github_pr_urls: list[str] | None = None,
         repository: str | None = None,
         branch: str | None = None,
         llm_model: str | None = None,
@@ -59,7 +60,10 @@ class OpenHandsClient:
                 max_budget = execution_record.max_budget
 
         # Build the processor list
-        processors = [AutomationEventCallbackProcessor()]
+        cb_processor = AutomationEventCallbackProcessor()
+        if state is not None and request is not None:
+            cb_processor.set_request_context(state, request)
+        processors = [cb_processor]
 
         # Register budget enforcement if a max_budget is configured
         if max_budget is not None and max_budget > 0:
@@ -86,6 +90,7 @@ class OpenHandsClient:
 
             processors=processors,
             jira_issue_key=jira_issue_key,
+            github_pr=github_pr_urls or [],
             llm_model=llm_model,
         )
 

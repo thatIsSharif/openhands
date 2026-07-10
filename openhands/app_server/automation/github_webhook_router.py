@@ -17,8 +17,8 @@ Flow:
 
 from __future__ import annotations
 
-import traceback
 import json
+import traceback
 
 from fastapi import APIRouter, BackgroundTasks, Request
 from pydantic import BaseModel
@@ -31,10 +31,6 @@ from openhands.app_server.automation.execution_store import ExecutionStore
 from openhands.app_server.automation.github_automation_service import (
     GitHubAutomationService,
     verify_github_signature,
-)
-from .input_sanitizer import (
-    build_rejection_message,
-    has_dangerous_patterns,
 )
 from openhands.app_server.automation.input_sanitizer import (
     has_dangerous_patterns,
@@ -57,6 +53,8 @@ from openhands.app_server.utils.docker_utils import (
 from openhands.app_server.utils.github import add_pr_comment
 from openhands.app_server.utils.logger import openhands_logger as logger
 from openhands.app_server.utils.sandbox_utils import pause_sandbox
+
+from .input_sanitizer import build_rejection_message
 
 
 def _get_agent_url_from_sandbox(sandbox) -> str | None:
@@ -477,8 +475,60 @@ async def post_github_pr_comment(
         async with get_app_conversation_info_service(state, request) as info_service:
             conversation = await info_service.get_conversation_by_pr_url(pr_url)
 
-        if conversation and conversation.sandbox_id:
-            await pause_sandbox(conversation.sandbox_id, state, request)
+            if conversation:
+                # Ensure github_pr is populated for backward compatibility
+                if (
+                    not conversation.github_pr
+                    or pr_url not in conversation.github_pr
+                ):
+                    from openhands.app_server.app_conversation.app_conversation_models import (
+                        AppConversationInfo,
+                    )
+
+                    github_pr = (
+                        list(conversation.github_pr)
+                        if conversation.github_pr
+                        else []
+                    )
+                    if pr_url not in github_pr:
+                        github_pr.append(pr_url)
+
+                    updated_info = AppConversationInfo(
+                        id=conversation.id,
+                        created_by_user_id=conversation.created_by_user_id,
+                        sandbox_id=conversation.sandbox_id,
+                        selected_repository=conversation.selected_repository,
+                        selected_branch=conversation.selected_branch,
+                        git_provider=conversation.git_provider,
+                        title=conversation.title,
+                        trigger=conversation.trigger,
+                        pr_number=conversation.pr_number,
+                        llm_model=conversation.llm_model,
+                        agent_kind=conversation.agent_kind,
+                        metrics=conversation.metrics,
+                        parent_conversation_id=conversation.parent_conversation_id,
+                        sub_conversation_ids=conversation.sub_conversation_ids,
+                        public=conversation.public,
+                        tags=conversation.tags,
+                        jira_issue_key=conversation.jira_issue_key,
+                        github_pr=github_pr,
+                        created_at=conversation.created_at,
+                        updated_at=conversation.updated_at,
+                    )
+                    await info_service.save_app_conversation_info(
+                        updated_info
+                    )
+                    logger.info(
+                        '[Automation] Updated github_pr for '
+                        'conversation %s with %s',
+                        conversation.id,
+                        pr_url,
+                    )
+
+                if conversation.sandbox_id:
+                    await pause_sandbox(
+                        conversation.sandbox_id, state, request
+                    )
     except Exception:
         logger.error(
             '[Automation] Failed to pause sandbox for PR %s #%d: %s',

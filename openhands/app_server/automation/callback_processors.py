@@ -6,7 +6,7 @@ Hooks into the EventCallbackProcessor system to react to terminal states.
 
 from __future__ import annotations
 
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
 from uuid import UUID
 
 from openhands.app_server.event_callback.event_callback_models import (
@@ -28,6 +28,9 @@ from .correlation import build_log_context
 from .execution_models import ExecutionState
 from .execution_store import ExecutionStore
 
+if TYPE_CHECKING:
+    from fastapi import Request
+
 
 class AutomationEventCallbackProcessor(EventCallbackProcessor):
     """Event callback processor that updates automation executions.
@@ -35,9 +38,21 @@ class AutomationEventCallbackProcessor(EventCallbackProcessor):
     Registered on automation-triggered conversations. Listens for
     ConversationStateUpdateEvent with terminal execution_status values
     (FINISHED, ERROR, STUCK) and updates the execution record.
+
+    When state and request are injected via set_request_context(),
+    the processor will also automatically pause the sandbox after
+    the execution state transition.
     """
 
     event_kind: ClassVar[EventKind] = 'ConversationStateUpdateEvent'
+
+    _state: object | None = None
+    _request: 'Request | None' = None
+
+    def set_request_context(self, state: object, request: 'Request') -> None:
+        """Store the request context for sandbox pause on terminal state."""
+        self._state = state
+        self._request = request
 
     async def __call__(
         self,
@@ -92,6 +107,10 @@ class AutomationEventCallbackProcessor(EventCallbackProcessor):
             ),
         )
 
+        # Pause the sandbox if request context is available
+        if self._state is not None and self._request is not None:
+            await self._pause_sandbox(conversation_id)
+
         # Disable this callback after terminal event
         callback.status = EventCallbackStatus.COMPLETED
 
@@ -101,5 +120,32 @@ class AutomationEventCallbackProcessor(EventCallbackProcessor):
             event_id=event.id,
             conversation_id=conversation_id,
         )
+
+    async def _pause_sandbox(self, conversation_id: UUID) -> None:
+        """Pause the sandbox associated with this conversation."""
+        try:
+            from openhands.app_server.config import (
+                get_app_conversation_info_service,
+            )
+            from openhands.app_server.utils.sandbox_utils import (
+                pause_sandbox,
+            )
+
+            async with get_app_conversation_info_service(
+                self._state, self._request
+            ) as info_service:
+                info = await info_service.get_app_conversation_info(
+                    conversation_id
+                )
+                if info and info.sandbox_id:
+                    await pause_sandbox(
+                        info.sandbox_id, self._state, self._request
+                    )
+        except Exception:
+            logger.error(
+                '[Automation] Failed to pause sandbox for conversation '
+                f'{conversation_id}:',
+                exc_info=True,
+            )
 
 

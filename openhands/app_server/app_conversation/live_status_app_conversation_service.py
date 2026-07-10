@@ -394,7 +394,7 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
 
             app_conversation_info = AppConversationInfo(
                 id=info.id,
-                title=f'Conversation {info.id.hex[:5]}',
+                title=request.title or f'Conversation {info.id.hex[:5]}',
                 sandbox_id=sandbox.id,
                 created_by_user_id=user_id,
                 llm_model=llm_model,
@@ -408,6 +408,7 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
                 pr_number=request.pr_number,
                 parent_conversation_id=request.parent_conversation_id,
                 jira_issue_key=request.jira_issue_key,
+                github_pr=request.github_pr,
             )
 
             await self.app_conversation_info_service.save_app_conversation_info(

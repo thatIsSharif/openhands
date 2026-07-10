@@ -209,6 +209,9 @@ class AppConversationStartRequest(OpenHandsModel):
     # Jira issue key for cross-referencing conversations with Jira issues
     jira_issue_key: str | None = None
 
+    # List of GitHub PR URLs for cross-referencing conversations with GitHub PRs
+    github_pr: list[str] = Field(default_factory=list)
+
     public: bool | None = None
 
     # Plugin parameters - for loading remote plugins into the conversation

@@ -394,6 +394,13 @@ class SQLAppConversationInfoService(AppConversationInfoService):
     async def save_app_conversation_info(
         self, info: AppConversationInfo
     ) -> AppConversationInfo:
+        logger.debug(
+            '[save_app_conversation_info] conversation_id=%s '
+            'jira_issue_key=%s github_pr=%s',
+            info.id,
+            info.jira_issue_key,
+            info.github_pr,
+        )
         metrics = info.metrics or MetricsSnapshot()
         usage = metrics.accumulated_token_usage or TokenUsage()
 
