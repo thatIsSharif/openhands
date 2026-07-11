@@ -1,11 +1,13 @@
 import asyncio
 import logging
 import os
+import re
 import socket
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import AsyncGenerator
+from urllib.parse import urlparse
 
 import base62
 import docker
@@ -37,6 +39,7 @@ from openhands.app_server.sandbox.sandbox_service import (
 from openhands.app_server.sandbox.sandbox_spec_service import SandboxSpecService
 from openhands.app_server.services.injector import InjectorState
 from openhands.app_server.utils.docker_utils import (
+    is_running_in_docker,
     replace_localhost_hostname_for_docker,
 )
 
@@ -105,10 +108,15 @@ class DockerSandboxService(SandboxService):
     use_host_network: bool = False
     kvm_enabled: bool = False
 
-    def _find_unused_port(self) -> int:
-        """Find an unused port on the host machine."""
+    @staticmethod
+    def _find_unused_port() -> int:
+        """Find an unused port on the host machine (legacy helper).
+
+        DEPRECATED: Port allocation is now delegated to Docker which binds
+        atomically to 127.0.0.1 and avoids TOCTOU races.
+        """
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.bind(('', 0))
+            s.bind(('127.0.0.1', 0))
             s.listen(1)
             port = s.getsockname()[1]
         return port
@@ -258,8 +266,11 @@ class DockerSandboxService(SandboxService):
                 if exposed_url.name == AGENT_SERVER
             )
             try:
-                # When running in Docker, replace localhost hostname with host.docker.internal for internal requests
-                app_server_url = replace_localhost_hostname_for_docker(app_server_url)
+                # When running in Docker, use host.docker.internal for internal
+                # health checks regardless of container_url_pattern. This allows
+                # container_url_pattern to be set to a public IP/domain for browser
+                # access while health checks still work via Docker networking.
+                app_server_url = self._get_internal_agent_server_url(app_server_url)
 
                 response = await self.httpx_client.get(
                     f'{app_server_url}{self.health_check_path}'
@@ -293,6 +304,48 @@ class DockerSandboxService(SandboxService):
                 sandbox_info.exposed_urls = None
                 sandbox_info.session_api_key = None
         return sandbox_info
+
+    @staticmethod
+    def _get_internal_agent_server_url(external_url: str) -> str:
+        """Get agent server URL using Docker-internal networking.
+
+        When running in Docker, the external URL (from container_url_pattern) may
+        contain a public IP/hostname that is not reachable from inside Docker.
+        This method extracts the port and uses host.docker.internal instead,
+        ensuring health checks work regardless of container_url_pattern.
+
+        Handles both formats:
+        - http://public-ip:PORT           (explicit port in URL)
+        - https://domain/runtime/PORT/    (path-based port via proxy)
+
+        When not running in Docker, falls back to the existing
+        replace_localhost_hostname_for_docker behavior.
+        """
+        if is_running_in_docker():
+            parsed = urlparse(external_url)
+            if parsed.port:
+                return f'http://host.docker.internal:{parsed.port}'
+            # Path-based port: https://domain/runtime/8000/path
+            match = re.match(r'/runtime/(\d+)', parsed.path or '')
+            if match:
+                return f'http://host.docker.internal:{match.group(1)}'
+        return replace_localhost_hostname_for_docker(external_url)
+
+    def _get_agent_server_url(self, sandbox: SandboxInfo) -> str:
+        """Get agent server URL using Docker-internal networking.
+
+        Overrides the base class method to ensure health checks use
+        host.docker.internal when running in Docker, regardless of the
+        container_url_pattern setting.
+        """
+        if not sandbox.exposed_urls:
+            raise SandboxError(f'No exposed URLs for sandbox: {sandbox.id}')
+
+        for exposed_url in sandbox.exposed_urls:
+            if exposed_url.name == AGENT_SERVER:
+                return self._get_internal_agent_server_url(exposed_url.url)
+
+        raise SandboxError(f'No agent server URL found for sandbox: {sandbox.id}')
 
     async def search_sandboxes(
         self,
@@ -450,20 +503,17 @@ class DockerSandboxService(SandboxService):
                 env_vars[f'OH_ALLOW_CORS_ORIGINS_{idx}'] = origin
 
         # Prepare port mappings and add port environment variables
-        # When using host network, container ports are directly accessible on the host
-        # so we use the container ports directly instead of mapping to random host ports
-        port_mappings: dict[int, int] | None = None
-        if self.use_host_network:
-            # Host network mode: container ports are directly accessible
-            for exposed_port in self.exposed_ports:
-                env_vars[exposed_port.name] = str(exposed_port.container_port)
-        else:
-            # Bridge network mode: map container ports to random host ports
-            port_mappings = {}
-            for exposed_port in self.exposed_ports:
-                host_port = self._find_unused_port()
-                port_mappings[exposed_port.container_port] = host_port
-                env_vars[exposed_port.name] = str(exposed_port.container_port)
+        # All exposed ports are bound to 127.0.0.1 only — the nginx proxy
+        # forwards public HTTPS traffic to them. This is safer than host
+        # networking (which binds to 0.0.0.0) and avoids random high ports.
+        # Docker picks random available ports atomically on 127.0.0.1,
+        # avoiding TOCTOU races. The actual host ports are read back from
+        # the container metadata in _container_to_sandbox_info and
+        # substituted into container_url_pattern via the {port} placeholder.
+        port_mappings: dict = {}
+        for exposed_port in self.exposed_ports:
+            env_vars[exposed_port.name] = str(exposed_port.container_port)
+            port_mappings[exposed_port.container_port] = ('127.0.0.1', 0)
 
         # Prepare labels
         labels = {

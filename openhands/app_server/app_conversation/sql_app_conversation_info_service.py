@@ -24,6 +24,8 @@ from datetime import UTC, datetime
 from typing import AsyncGenerator, cast
 from uuid import UUID
 
+from sqlalchemy.exc import IntegrityError
+
 from fastapi import Request
 from sqlalchemy import (
     ColumnElement,
@@ -439,8 +441,16 @@ class SQLAppConversationInfoService(AppConversationInfoService):
             github_pr=info.github_pr if info.github_pr else None,
         )
 
-        await self.db_session.merge(stored)
-        await self.db_session.commit()
+        try:
+            await self.db_session.merge(stored)
+            await self.db_session.commit()
+        except IntegrityError:
+            # SQLite race: another concurrent request committed the same
+            # conversation_id between our SELECT (inside merge) and INSERT.
+            # Rollback and retry once — merge will now find the existing row.
+            await self.db_session.rollback()
+            await self.db_session.merge(stored)
+            await self.db_session.commit()
         return info
 
     async def update_conversation_statistics(

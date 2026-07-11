@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import tempfile
 import zipfile
 from collections import defaultdict
@@ -9,6 +10,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, AsyncGenerator, Sequence, cast
+from urllib.parse import urlparse
 from uuid import UUID, uuid4
 
 import httpx
@@ -87,6 +89,7 @@ from openhands.app_server.settings.llm_profiles import resolve_profile_llm
 from openhands.app_server.user.user_context import UserContext
 from openhands.app_server.user.user_models import UserInfo
 from openhands.app_server.utils.docker_utils import (
+    is_running_in_docker,
     replace_localhost_hostname_for_docker,
 )
 from openhands.app_server.utils.git import ensure_valid_git_branch_name
@@ -868,7 +871,18 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
             _logger.warning('Failed to prune sandbox profiles', exc_info=True)
 
     def _get_agent_server_url(self, sandbox: SandboxInfo) -> str:
-        """Get agent server url for running sandbox."""
+        """Get agent server url for running sandbox.
+
+        When running inside Docker, use host.docker.internal for internal
+        connectivity regardless of the container_url_pattern. This allows
+        container_url_pattern to be set to a public IP/domain for browser
+        access while the app server still reaches sandboxes via Docker
+        networking.
+
+        Handles both formats:
+        - http://public-ip:PORT           (explicit port in URL)
+        - https://domain/runtime/PORT/    (path-based port via proxy)
+        """
         exposed_urls = sandbox.exposed_urls
         assert exposed_urls is not None
         agent_server_url = next(
@@ -876,8 +890,15 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
             for exposed_url in exposed_urls
             if exposed_url.name == AGENT_SERVER
         )
-        agent_server_url = replace_localhost_hostname_for_docker(agent_server_url)
-        return agent_server_url
+        if is_running_in_docker():
+            parsed = urlparse(agent_server_url)
+            if parsed.port:
+                return f'http://host.docker.internal:{parsed.port}'
+            # Path-based port: https://domain/runtime/8000/path
+            match = re.match(r'/runtime/(\d+)', parsed.path or '')
+            if match:
+                return f'http://host.docker.internal:{match.group(1)}'
+        return replace_localhost_hostname_for_docker(agent_server_url)
 
     def _inherit_configuration_from_parent(
         self, request: AppConversationStartRequest, parent_info: AppConversationInfo

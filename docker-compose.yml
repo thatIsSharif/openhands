@@ -11,6 +11,12 @@ services:
       - AGENT_SERVER_IMAGE_TAG=${AGENT_SERVER_IMAGE_TAG:-1.28.0-python}
       #- SANDBOX_USER_ID=${SANDBOX_USER_ID:-1234} # enable this only if you want a specific non-root sandbox user but you will have to manually adjust permissions of ~/.openhands for this user
       - WORKSPACE_MOUNT_PATH=${WORKSPACE_BASE:-$PWD/workspace}
+
+      # CRITICAL for remote/EC2 access via HTTPS + nginx proxy
+      - OH_WEB_URL=https://openhands.letmdevops.site
+      - SANDBOX_CONTAINER_URL_PATTERN=https://openhands.letmdevops.site/runtime/{port}
+      - SANDBOX_HOST_PORT=3000
+      - SANDBOX_STARTUP_GRACE_SECONDS=300
       # Jira auth
       - JIRA_EMAIL=${JIRA_EMAIL}
       - JIRA_API_KEY=${JIRA_API_KEY}
