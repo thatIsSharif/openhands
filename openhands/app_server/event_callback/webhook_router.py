@@ -365,6 +365,10 @@ async def on_conversation_update(
         metrics=conversation_info.stats.get_combined_metrics(),
         # Store merged tags (includes automation context, skills, etc.)
         tags=merged_tags,
+        # Jira issue key for cross-referencing conversations with Jira issues
+        jira_issue_key=existing.jira_issue_key,
+        # GitHub PR URLs for cross-referencing conversations with GitHub PRs
+        github_pr=existing.github_pr,
     )
 
     await app_conversation_info_service.save_app_conversation_info(
