@@ -10,6 +10,9 @@ from pydantic import Field, SecretStr
 
 # Import the event_callback module to ensure all processors are registered
 import openhands.app_server.event_callback  # noqa: F401
+
+# Import the workspace_export module to ensure ExportOnCompletionCallbackProcessor is registered
+import openhands.app_server.workspace_export  # noqa: F401
 from openhands.agent_server.env_parser import from_env
 from openhands.app_server.app_conversation.app_conversation_info_service import (
     AppConversationInfoService,
@@ -522,6 +525,61 @@ def get_jwt_service(
 def get_app_lifespan_service() -> AppLifespanService | None:
     config = get_global_config()
     return config.lifespan
+
+
+def get_workspace_export_service(
+    state: InjectorState, request: Request | None = None
+) -> AsyncContextManager['WorkspaceExportService']:
+    """Return a WorkspaceExportService instance.
+
+    This is a lightweight factory (not a full injector) since the service
+    has simple constructor dependencies.
+    """
+    from openhands.app_server.workspace_export.export_service import (
+        WorkspaceExportService,
+    )
+    from openhands.app_server.workspace_export.local_storage import LocalStorage
+
+    export_dir = os.getenv(
+        'WORKSPACE_EXPORT_DIR',
+        str(get_default_persistence_dir() / 'exports'),
+    )
+    max_size = int(os.getenv('WORKSPACE_EXPORT_MAX_IMAGE_SIZE_MB', '5000'))
+    prefix = os.getenv('WORKSPACE_EXPORT_SNAPSHOT_PREFIX', 'oh-export-')
+
+    storage = LocalStorage(export_dir=export_dir)
+    service = WorkspaceExportService(
+        storage_backend=storage,
+        max_image_size_mb=max_size,
+        snapshot_prefix=prefix,
+    )
+
+    async def _gen() -> 'WorkspaceExportService':
+        yield service
+
+    return __import__('contextlib').asynccontextmanager(_gen)()  # type: ignore[arg-type]
+
+
+def get_workspace_restore_service(
+    state: InjectorState, request: Request | None = None
+) -> AsyncContextManager['WorkspaceRestoreService']:
+    """Return a WorkspaceRestoreService instance."""
+    from openhands.app_server.workspace_export.local_storage import LocalStorage
+    from openhands.app_server.workspace_export.restore_service import (
+        WorkspaceRestoreService,
+    )
+
+    export_dir = os.getenv(
+        'WORKSPACE_EXPORT_DIR',
+        str(get_default_persistence_dir() / 'exports'),
+    )
+    storage = LocalStorage(export_dir=export_dir)
+    service = WorkspaceRestoreService(storage_backend=storage)
+
+    async def _gen() -> 'WorkspaceRestoreService':
+        yield service
+
+    return __import__('contextlib').asynccontextmanager(_gen)()  # type: ignore[arg-type]
 
 
 def depends_event_service():
