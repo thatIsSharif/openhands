@@ -1,15 +1,12 @@
 """Callback processor that auto-exports workspace on conversation completion.
 
-Listens for ``ConversationStateUpdateEvent`` with ``event.key == 'full_state'``
-and checks ``execution_status`` in the event payload. When the conversation
-reaches a terminal state (``finished``, ``error``, ``stopped``) AND has a
-``jira_issue_key`` in its conversation metadata, it triggers an export in
-the background.
+Listens for ``ConversationStateUpdateEvent`` with ``event.key == 'execution_status'``.
+When the conversation reaches a terminal state and has a ``jira_issue_key`` in
+its conversation metadata, it triggers an export via ``WorkspaceExportService``.
 """
 
 from __future__ import annotations
 
-import json
 import logging
 from typing import TYPE_CHECKING, ClassVar
 from uuid import UUID
@@ -23,7 +20,7 @@ from openhands.app_server.event_callback.event_callback_result_models import (
     EventCallbackResult,
     EventCallbackResultStatus,
 )
-from openhands.sdk import Event
+from openhands.sdk import ConversationExecutionStatus, Event
 from openhands.sdk.event.conversation_state import ConversationStateUpdateEvent
 
 if TYPE_CHECKING:
@@ -31,11 +28,10 @@ if TYPE_CHECKING:
 
 _logger = logging.getLogger(__name__)
 
-TERMINAL_STATUSES = frozenset({'finished', 'error', 'stopped'})
-
 
 class ExportOnCompletionCallbackProcessor(EventCallbackProcessor):
-    """Automatically export workspace when a conversation completes."""
+    """Automatically export workspace when a conversation with a Jira
+    issue key reaches terminal state."""
 
     event_kind: ClassVar[EventKind] = 'ConversationStateUpdateEvent'
 
@@ -43,7 +39,7 @@ class ExportOnCompletionCallbackProcessor(EventCallbackProcessor):
     _request: 'Request | None' = None
 
     def set_request_context(self, state: object, request: 'Request') -> None:
-        """Store the request context for sandbox export on terminal state."""
+        """Store the request context for DI on terminal state."""
         self._state = state
         self._request = request
 
@@ -56,51 +52,67 @@ class ExportOnCompletionCallbackProcessor(EventCallbackProcessor):
         if not isinstance(event, ConversationStateUpdateEvent):
             return None
 
-        if event.key != 'full_state':
+        if event.key != 'execution_status':
             return None
 
         try:
-            payload = (
-                json.loads(event.value)
-                if isinstance(event.value, str)
-                else event.value
+            exec_status = ConversationExecutionStatus(event.value)
+        except (ValueError, TypeError):
+            return None
+
+        if not exec_status.is_terminal():
+            return None
+
+        # Need request context to call DI-backed services
+        if self._state is None or self._request is None:
+            _logger.warning(
+                'ExportOnCompletionCallbackProcessor has no request context — '
+                'skipping export for conversation %s',
+                conversation_id,
             )
-        except (json.JSONDecodeError, TypeError):
             return None
 
-        if not isinstance(payload, dict):
-            return None
+        # Look up jira_issue_key from the database
+        from openhands.app_server.config import (
+            get_app_conversation_info_service,
+        )
 
-        exec_status = payload.get('execution_status')
-        if exec_status not in TERMINAL_STATUSES:
-            return None
+        jira_key: str | None = None
+        try:
+            async with get_app_conversation_info_service(
+                self._state, self._request
+            ) as info_service:
+                info = await info_service.get_app_conversation_info(conversation_id)
+                if info:
+                    jira_key = info.jira_issue_key
+        except Exception:
+            _logger.exception(
+                'Failed to fetch conversation info for export check (%s)',
+                conversation_id,
+            )
 
-        jira_key = payload.get('jira_issue_key')
         if not jira_key:
+            _logger.debug(
+                'No jira_issue_key for conversation %s — skipping export',
+                conversation_id,
+            )
             return None
 
         _logger.info(
             'Conversation %s reached terminal status "%s" with jira_key=%s — '
             'triggering workspace export',
             conversation_id,
-            exec_status,
+            exec_status.value,
             jira_key,
         )
 
-        if self._state is not None and self._request is not None:
-            try:
-                await self._run_export(conversation_id, jira_key)
-            except Exception:
-                _logger.exception(
-                    'Workspace export failed for conversation %s (jira_key=%s)',
-                    conversation_id,
-                    jira_key,
-                )
-        else:
-            _logger.warning(
-                'ExportOnCompletionCallbackProcessor has no request context — '
-                'skipping export for conversation %s',
+        try:
+            await self._run_export(conversation_id, jira_key)
+        except Exception:
+            _logger.exception(
+                'Workspace export failed for conversation %s (jira_key=%s)',
                 conversation_id,
+                jira_key,
             )
 
         return EventCallbackResult(
@@ -111,7 +123,7 @@ class ExportOnCompletionCallbackProcessor(EventCallbackProcessor):
         )
 
     async def _run_export(self, conversation_id: UUID, jira_key: str) -> None:
-        """Actually run the export using dependency injection."""
+        """Run the export using dependency injection."""
         from openhands.app_server.config import (
             get_app_conversation_info_service,
             get_app_conversation_service,

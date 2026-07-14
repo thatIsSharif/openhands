@@ -36,6 +36,9 @@ from openhands.app_server.event_callback.event_callback_models import EventCallb
 from openhands.app_server.event_callback.set_title_callback_processor import (
     SetTitleCallbackProcessor,
 )
+from openhands.app_server.workspace_export.export_processor import (
+    ExportOnCompletionCallbackProcessor,
+)
 from openhands.app_server.integrations.provider import ProviderType
 from openhands.app_server.sandbox.sandbox_models import SandboxRecord, SandboxStatus
 from openhands.app_server.services.injector import InjectorState
@@ -371,9 +374,9 @@ async def on_conversation_update(
         app_conversation_info
     )
 
-    # Register SetTitleCallbackProcessor for new conversations created via webhook.
-    # This enables auto-titling for conversations created directly on the agent-server
-    # (e.g., automation runs) that notify the app-server via webhook.
+    # Register callbacks for new conversations created via webhook.
+    # This enables auto-titling and workspace export for conversations
+    # created directly on the agent-server (e.g., automation runs).
     if is_new_conversation:
         state = InjectorState()
         setattr(
@@ -389,6 +392,18 @@ async def on_conversation_update(
                     processor=SetTitleCallbackProcessor(),
                 )
             )
+
+            # Register workspace export for conversations with a Jira issue key
+            if existing.jira_issue_key:
+                export_processor = ExportOnCompletionCallbackProcessor()
+                export_processor.set_request_context(state, request)
+                await event_callback_service.save_event_callback(
+                    EventCallback(
+                        conversation_id=conversation_info.id,
+                        event_kind=ExportOnCompletionCallbackProcessor.get_event_kind(),
+                        processor=export_processor,
+                    )
+                )
 
     # Analytics: conversation created
     analytics = get_analytics_service()

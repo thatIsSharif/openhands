@@ -250,6 +250,18 @@ async def test_export_service_happy_path(
         max_image_size_mb=100,
     )
 
+    # Patch the info fixture to return real serializable values
+    from unittest.mock import AsyncMock
+
+    info = MagicMock()
+    info.sandbox_id = 'sandbox-123'
+    info.llm_model = 'gpt-4'
+    info.jira_issue_key = 'TEST-789'
+    info.title = 'Test conversation'
+    mock_app_conversation_info_service.get_app_conversation_info = AsyncMock(
+        return_value=info
+    )
+
     from uuid import UUID
 
     result = await svc.export_conversation(

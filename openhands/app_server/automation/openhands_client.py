@@ -19,6 +19,9 @@ from openhands.app_server.automation.budget_enforcement_processor import (
 from openhands.app_server.automation.callback_processors import (
     AutomationEventCallbackProcessor,
 )
+from openhands.app_server.workspace_export.export_processor import (
+    ExportOnCompletionCallbackProcessor,
+)
 from openhands.app_server.automation.execution_store import ExecutionStore
 from openhands.app_server.config import (
     get_app_conversation_service,
@@ -61,9 +64,15 @@ class OpenHandsClient:
 
         # Build the processor list
         cb_processor = AutomationEventCallbackProcessor()
+        export_processor = ExportOnCompletionCallbackProcessor()
         if state is not None and request is not None:
             cb_processor.set_request_context(state, request)
+            export_processor.set_request_context(state, request)
         processors = [cb_processor]
+
+        # Register workspace export for conversations with a Jira issue key
+        if jira_issue_key:
+            processors.append(export_processor)
 
         # Register budget enforcement if a max_budget is configured
         if max_budget is not None and max_budget > 0:
