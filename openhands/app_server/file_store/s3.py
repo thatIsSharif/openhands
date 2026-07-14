@@ -3,9 +3,59 @@ from typing import Any, TypedDict
 
 import boto3
 import botocore
+from botocore.config import Config
 from pydantic import Field, PrivateAttr
 
 from openhands.app_server.file_store.files import FileStore
+
+
+def _use_real_aws() -> bool:
+    """Determine whether to use real AWS S3 or a local compatible service."""
+    return os.getenv('USE_AWS_S3', 'false').lower() in ('true', '1')
+
+
+def create_s3_client() -> Any:
+    """Create a boto3 S3 client, choosing between real AWS and LocalStack.
+
+    When ``USE_AWS_S3`` is true (or ``'1'``), the client uses the standard
+    boto3 resolution chain (environment variables, ``~/.aws/credentials``,
+    IAM roles, etc.) with no custom endpoint.
+
+    When ``USE_AWS_S3`` is false (the default), the client targets a
+    LocalStack-compatible service:
+
+    * ``LOCALSTACK_ENDPOINT`` — custom endpoint URL (default: ``http://localhost:4566``)
+    * ``AWS_ACCESS_KEY_ID`` / ``AWS_SECRET_ACCESS_KEY`` — plaintext test credentials
+    * Path-style addressing — required because LocalStack does not resolve
+      virtual-hosted-style bucket names through the custom endpoint.
+
+    Returns:
+        A configured ``boto3.client('s3')`` instance.
+    """
+    if _use_real_aws():
+        return boto3.client('s3')
+
+    endpoint = os.getenv('LOCALSTACK_ENDPOINT', 'http://localhost:4566')
+    return boto3.client(
+        's3',
+        aws_access_key_id=os.getenv('AWS_ACCESS_KEY_ID', 'test'),
+        aws_secret_access_key=os.getenv('AWS_SECRET_ACCESS_KEY', 'test'),
+        endpoint_url=_ensure_url_scheme(False, endpoint),
+        use_ssl=False,
+        config=Config(s3={'addressing_style': 'path'}),
+    )
+
+
+def _ensure_url_scheme(secure: bool, url: str | None) -> str | None:
+    if not url:
+        return None
+    if secure:
+        if not url.startswith('https://'):
+            url = 'https://' + url.removeprefix('http://')
+    else:
+        if not url.startswith('http://'):
+            url = 'http://' + url.removeprefix('https://')
+    return url
 
 
 class S3ObjectDict(TypedDict):
@@ -23,7 +73,9 @@ class ListObjectsV2OutputDict(TypedDict):
 class S3FileStore(FileStore):
     """S3-compatible file store.
 
-    The S3 client is initialized lazily on first access.
+    The S3 client is initialized lazily on first access.  Client creation
+    is delegated to :func:`create_s3_client` so that the same factory logic
+    is shared across the codebase.
     """
 
     bucket_name: str = Field(default='')
@@ -41,17 +93,7 @@ class S3FileStore(FileStore):
     def client(self) -> Any:
         """Get the S3 client, initializing lazily on first access."""
         if self._client is None:
-            access_key = os.getenv('AWS_ACCESS_KEY_ID')
-            secret_key = os.getenv('AWS_SECRET_ACCESS_KEY')
-            secure = os.getenv('AWS_S3_SECURE', 'true').lower() == 'true'
-            endpoint = self._ensure_url_scheme(secure, os.getenv('AWS_S3_ENDPOINT'))
-            self._client = boto3.client(
-                's3',
-                aws_access_key_id=access_key,
-                aws_secret_access_key=secret_key,
-                endpoint_url=endpoint,
-                use_ssl=secure,
-            )
+            self._client = create_s3_client()
         return self._client
 
     def write(self, path: str, contents: str | bytes) -> None:
@@ -174,14 +216,3 @@ class S3FileStore(FileStore):
             raise FileNotFoundError(
                 f"Error: Failed to delete key '{path}' from bucket '{self._get_bucket_name()}: {e}"
             )
-
-    def _ensure_url_scheme(self, secure: bool, url: str | None) -> str | None:
-        if not url:
-            return None
-        if secure:
-            if not url.startswith('https://'):
-                url = 'https://' + url.removeprefix('http://')
-        else:
-            if not url.startswith('http://'):
-                url = 'http://' + url.removeprefix('https://')
-        return url

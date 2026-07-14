@@ -4,19 +4,22 @@ This module tests the AWS S3-based implementation of EventService,
 focusing on search functionality and S3 operations.
 """
 
-import importlib
 import json
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
 import botocore.exceptions
 import pytest
 
-from openhands.app_server.event import aws_event_service
 from openhands.app_server.event.aws_event_service import (
     AwsEventService,
     AwsEventServiceInjector,
+)
+from openhands.app_server.file_store.s3 import (
+    _ensure_url_scheme,
+    _use_real_aws,
+    create_s3_client,
 )
 from openhands.sdk.event import PauseEvent, TokenEvent
 
@@ -215,122 +218,111 @@ class TestAwsEventServiceInjector:
         assert injector.prefix == Path('users')
 
 
-class TestGetDefaultAwsEndpointUrl:
-    """Test cases for _get_default_aws_endpoint_url function."""
+class TestUseRealAws:
+    """Test cases for _use_real_aws function."""
 
-    def test_no_env_vars_returns_none(self, monkeypatch):
-        """Test that function returns None when no env vars are set."""
-        monkeypatch.delenv('AWS_S3_ENDPOINT', raising=False)
-        monkeypatch.delenv('AWS_S3_SECURE', raising=False)
+    def test_defaults_to_false(self, monkeypatch):
+        """Default should be False (LocalStack)."""
+        monkeypatch.delenv('USE_AWS_S3', raising=False)
+        assert not _use_real_aws()
 
-        # Need to reload to get fresh default factory
-        importlib.reload(aws_event_service)
+    def test_true_value(self, monkeypatch):
+        """'true' should enable real AWS."""
+        monkeypatch.setenv('USE_AWS_S3', 'true')
+        assert _use_real_aws()
 
-        result = aws_event_service._get_default_aws_endpoint_url()
-        assert result is None
+    def test_1_value(self, monkeypatch):
+        """'1' should enable real AWS (Helm chart compatibility)."""
+        monkeypatch.setenv('USE_AWS_S3', '1')
+        assert _use_real_aws()
 
-    def test_endpoint_with_https_prefix_secure(self, monkeypatch):
-        """Test endpoint with https:// prefix when secure=true."""
-        monkeypatch.setenv('AWS_S3_ENDPOINT', 'https://minio.example.com:9000')
-        monkeypatch.setenv('AWS_S3_SECURE', 'true')
+    def test_false_value(self, monkeypatch):
+        """'false' should disable real AWS."""
+        monkeypatch.setenv('USE_AWS_S3', 'false')
+        assert not _use_real_aws()
 
-        importlib.reload(aws_event_service)
-
-        result = aws_event_service._get_default_aws_endpoint_url()
-        assert result == 'https://minio.example.com:9000'
-
-    def test_endpoint_without_https_prefix_secure(self, monkeypatch):
-        """Test endpoint without https:// prefix when secure=true adds it."""
-        monkeypatch.setenv('AWS_S3_ENDPOINT', 'minio.example.com:9000')
-        monkeypatch.setenv('AWS_S3_SECURE', 'true')
-
-        importlib.reload(aws_event_service)
-
-        result = aws_event_service._get_default_aws_endpoint_url()
-        assert result == 'https://minio.example.com:9000'
-
-    def test_endpoint_with_http_prefix_insecure(self, monkeypatch):
-        """Test endpoint with http:// prefix when secure=false."""
-        monkeypatch.setenv('AWS_S3_ENDPOINT', 'http://minio.example.com:9000')
-        monkeypatch.setenv('AWS_S3_SECURE', 'false')
-
-        importlib.reload(aws_event_service)
-
-        result = aws_event_service._get_default_aws_endpoint_url()
-        assert result == 'http://minio.example.com:9000'
-
-    def test_endpoint_without_http_prefix_insecure(self, monkeypatch):
-        """Test endpoint without http:// prefix when secure=false adds it."""
-        monkeypatch.setenv('AWS_S3_ENDPOINT', 'minio.example.com:9000')
-        monkeypatch.setenv('AWS_S3_SECURE', 'false')
-
-        importlib.reload(aws_event_service)
-
-        result = aws_event_service._get_default_aws_endpoint_url()
-        assert result == 'http://minio.example.com:9000'
-
-    def test_endpoint_with_http_converted_to_https(self, monkeypatch):
-        """Test http:// is converted to https:// when secure=true."""
-        monkeypatch.setenv('AWS_S3_ENDPOINT', 'http://minio.example.com:9000')
-        monkeypatch.setenv('AWS_S3_SECURE', 'true')
-
-        importlib.reload(aws_event_service)
-
-        result = aws_event_service._get_default_aws_endpoint_url()
-        assert result == 'https://minio.example.com:9000'
-
-    def test_endpoint_with_https_converted_to_http(self, monkeypatch):
-        """Test https:// is converted to http:// when secure=false."""
-        monkeypatch.setenv('AWS_S3_ENDPOINT', 'https://minio.example.com:9000')
-        monkeypatch.setenv('AWS_S3_SECURE', 'false')
-
-        importlib.reload(aws_event_service)
-
-        result = aws_event_service._get_default_aws_endpoint_url()
-        assert result == 'http://minio.example.com:9000'
-
-    def test_secure_default_is_true(self, monkeypatch):
-        """Test that secure defaults to true when not set."""
-        monkeypatch.setenv('AWS_S3_ENDPOINT', 'minio.example.com:9000')
-        monkeypatch.delenv('AWS_S3_SECURE', raising=False)
-
-        importlib.reload(aws_event_service)
-
-        result = aws_event_service._get_default_aws_endpoint_url()
-        assert result == 'https://minio.example.com:9000'
+    def test_case_insensitive(self, monkeypatch):
+        """Values should be case-insensitive."""
+        monkeypatch.setenv('USE_AWS_S3', 'TRUE')
+        assert _use_real_aws()
 
 
-class TestAwsEventServiceInjectorEndpointUrl:
-    """Test cases for AwsEventServiceInjector endpoint_url field."""
+class TestEnsureUrlScheme:
+    """Test cases for _ensure_url_scheme function."""
 
-    def test_injector_endpoint_url_from_env(self, monkeypatch):
-        """Test that endpoint_url is populated from environment variables."""
-        monkeypatch.setenv('AWS_S3_ENDPOINT', 'minio.example.com:9000')
-        monkeypatch.setenv('AWS_S3_SECURE', 'false')
+    def test_secure_adds_https_prefix(self):
+        assert _ensure_url_scheme(True, 's3.amazonaws.com') == 'https://s3.amazonaws.com'
 
-        importlib.reload(aws_event_service)
+    def test_insecure_adds_http_prefix(self):
+        assert _ensure_url_scheme(False, 'localhost:4566') == 'http://localhost:4566'
 
-        injector = aws_event_service.AwsEventServiceInjector(bucket_name='my-bucket')
-        assert injector.endpoint_url == 'http://minio.example.com:9000'
+    def test_secure_converts_http_to_https(self):
+        assert _ensure_url_scheme(True, 'http://minio.example.com:9000') == 'https://minio.example.com:9000'
 
-    def test_injector_accepts_custom_endpoint_url(self, monkeypatch):
-        """Test that injector accepts custom endpoint_url parameter."""
-        monkeypatch.delenv('AWS_S3_ENDPOINT', raising=False)
-        monkeypatch.delenv('AWS_S3_SECURE', raising=False)
+    def test_insecure_converts_https_to_http(self):
+        assert _ensure_url_scheme(False, 'https://minio.example.com:9000') == 'http://minio.example.com:9000'
 
-        importlib.reload(aws_event_service)
+    def test_secure_preserves_existing_https(self):
+        assert _ensure_url_scheme(True, 'https://s3.amazonaws.com') == 'https://s3.amazonaws.com'
 
-        injector = aws_event_service.AwsEventServiceInjector(
-            bucket_name='my-bucket', endpoint_url='https://custom.example.com:9000'
-        )
-        assert injector.endpoint_url == 'https://custom.example.com:9000'
+    def test_insecure_preserves_existing_http(self):
+        assert _ensure_url_scheme(False, 'http://localhost:4566') == 'http://localhost:4566'
 
-    def test_injector_endpoint_url_none_when_no_env(self, monkeypatch):
-        """Test that endpoint_url is None when no env vars set."""
-        monkeypatch.delenv('AWS_S3_ENDPOINT', raising=False)
-        monkeypatch.delenv('AWS_S3_SECURE', raising=False)
+    def test_none_returns_none(self):
+        assert _ensure_url_scheme(True, None) is None
+        assert _ensure_url_scheme(False, None) is None
 
-        importlib.reload(aws_event_service)
 
-        injector = aws_event_service.AwsEventServiceInjector(bucket_name='my-bucket')
-        assert injector.endpoint_url is None
+class TestCreateS3Client:
+    """Test cases for create_s3_client factory function."""
+
+    def test_localstack_creates_client_with_correct_params(self, monkeypatch):
+        """LocalStack mode should pass endpoint_url and use_ssl=False."""
+        monkeypatch.setenv('USE_AWS_S3', 'false')
+        monkeypatch.setenv('LOCALSTACK_ENDPOINT', 'http://localstack:4566')
+        monkeypatch.setenv('AWS_ACCESS_KEY_ID', 'test-key')
+        monkeypatch.setenv('AWS_SECRET_ACCESS_KEY', 'test-secret')
+
+        with patch('boto3.client') as mock_client:
+            create_s3_client()
+
+        mock_client.assert_called_once()
+        _, kwargs = mock_client.call_args
+        assert kwargs['endpoint_url'] == 'http://localstack:4566'
+        assert kwargs['use_ssl'] is False
+        assert kwargs['aws_access_key_id'] == 'test-key'
+        assert kwargs['aws_secret_access_key'] == 'test-secret'
+        assert 'config' in kwargs
+
+    def test_localstack_defaults_test_credentials(self, monkeypatch):
+        """LocalStack should default to 'test' credentials when none set."""
+        monkeypatch.setenv('USE_AWS_S3', 'false')
+        monkeypatch.delenv('AWS_ACCESS_KEY_ID', raising=False)
+        monkeypatch.delenv('AWS_SECRET_ACCESS_KEY', raising=False)
+
+        with patch('boto3.client') as mock_client:
+            create_s3_client()
+
+        _, kwargs = mock_client.call_args
+        assert kwargs['aws_access_key_id'] == 'test'
+        assert kwargs['aws_secret_access_key'] == 'test'
+
+    def test_real_aws_no_custom_endpoint(self, monkeypatch):
+        """Real AWS mode should not pass endpoint_url."""
+        monkeypatch.setenv('USE_AWS_S3', 'true')
+
+        with patch('boto3.client') as mock_client:
+            create_s3_client()
+
+        mock_client.assert_called_once()
+        _, kwargs = mock_client.call_args
+        assert 'endpoint_url' not in kwargs or kwargs['endpoint_url'] is None
+
+    def test_real_aws_uses_standard_resolution(self, monkeypatch):
+        """Real AWS should call boto3.client without extra config."""
+        monkeypatch.setenv('USE_AWS_S3', '1')
+
+        with patch('boto3.client') as mock_client:
+            create_s3_client()
+
+        mock_client.assert_called_once_with('s3')

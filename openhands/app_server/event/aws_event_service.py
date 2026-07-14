@@ -1,23 +1,21 @@
 """AWS S3-based EventService implementation.
 
-This implementation uses role-based authentication (no credentials needed).
+Supports both real AWS S3 and LocalStack via the shared S3 client factory.
 """
 
 import json
 import logging
-import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, AsyncGenerator
 
-import boto3
 import botocore.exceptions
 from fastapi import Request
-from pydantic import Field
 
 from openhands.app_server.config import get_app_conversation_info_service
 from openhands.app_server.event.event_service import EventService, EventServiceInjector
 from openhands.app_server.event.event_service_base import EventServiceBase
+from openhands.app_server.file_store.s3 import create_s3_client
 from openhands.app_server.services.injector import InjectorState
 from openhands.sdk import Event
 
@@ -76,25 +74,9 @@ class AwsEventService(EventServiceBase):
         return paths
 
 
-def _get_default_aws_endpoint_url() -> str | None:
-    """Legacy fallback for aws endpoint url based on V0"""
-    endpoint_url = os.getenv('AWS_S3_ENDPOINT')
-    if not endpoint_url:
-        return None
-    secure = os.getenv('AWS_S3_SECURE', 'true').lower() == 'true'
-    if secure:
-        if not endpoint_url.startswith('https://'):
-            endpoint_url = 'https://' + endpoint_url.removeprefix('http://')
-    else:
-        if not endpoint_url.startswith('http://'):
-            endpoint_url = 'http://' + endpoint_url.removeprefix('https://')
-    return endpoint_url
-
-
 class AwsEventServiceInjector(EventServiceInjector):
     bucket_name: str
     prefix: Path = Path('users')
-    endpoint_url: str | None = Field(default_factory=_get_default_aws_endpoint_url)
 
     async def inject(
         self, state: InjectorState, request: Request | None = None
@@ -113,12 +95,7 @@ class AwsEventServiceInjector(EventServiceInjector):
 
             bucket_name = self.bucket_name
 
-            # Use role-based authentication - boto3 will automatically
-            # use IAM role credentials when running in AWS
-            s3_client = boto3.client(
-                's3',
-                endpoint_url=self.endpoint_url,
-            )
+            s3_client = create_s3_client()
 
             yield AwsEventService(
                 prefix=self.prefix,
