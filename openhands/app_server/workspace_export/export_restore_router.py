@@ -60,20 +60,13 @@ async def export_conversation(
             detail='Conversation has no jira_issue_key — cannot export',
         )
 
-    from openhands.app_server.config import get_event_service
-
-    async with get_workspace_export_service(
-        state, request
-    ) as export_service, get_event_service(
-        state, request
-    ) as event_service:
+    async with get_workspace_export_service(state, request) as export_service:
         result = await export_service.export_conversation(
             conversation_id=conversation_id,
             jira_key=jira_key,
             app_conversation_service=app_conversation_service,
             app_conversation_info_service=app_conversation_info_service,
             docker_sandbox_service=sandbox_service,
-            event_service=event_service,
         )
 
     if not result.success:

@@ -28,12 +28,14 @@ from openhands.app_server.app_conversation.app_conversation_info_service import 
 from openhands.app_server.app_conversation.app_conversation_service import (
     AppConversationService,
 )
-from openhands.app_server.event.event_service import EventService
+from openhands.app_server.config import get_global_config
+from openhands.app_server.conversation_paths import V1_CONVERSATIONS_DIR
 from openhands.app_server.sandbox.sandbox_service import SandboxService
 from openhands.app_server.workspace_export.storage_backend import (
     SnapshotMetadata,
     StorageBackend,
 )
+from openhands.sdk import Event
 
 _logger = logging.getLogger(__name__)
 
@@ -65,6 +67,52 @@ class WorkspaceExportService:
     def _get_docker_client() -> docker.DockerClient:
         return docker.from_env(timeout=300)
 
+    async def _load_events_from_disk(
+        self,
+        conversation_id: UUID,
+        created_by_user_id: str | None,
+    ) -> list[dict] | None:
+        """Read conversation event files directly from disk.
+
+        Events are stored by the webhook handler as individual JSON files
+        at ``{persistence_dir}/{created_by_user_id}/v1_conversations/
+        {conversation_id_hex}/``.  This avoids the injection-layer user-
+        context mismatch that can occur when using ``EventService``.
+
+        Returns ``None`` when the directory is absent (e.g. S3/GCP-backed
+        deployments) so callers can fall back gracefully.
+        """
+        if not created_by_user_id:
+            _logger.warning(
+                'No created_by_user_id for %s — cannot load events',
+                conversation_id,
+            )
+            return None
+
+        prefix = get_global_config().persistence_dir
+        conv_path = prefix / created_by_user_id / V1_CONVERSATIONS_DIR / conversation_id.hex
+
+        if not conv_path.is_dir():
+            _logger.warning(
+                'Event directory not found: %s', conv_path
+            )
+            return None
+
+        raw_events: list[dict] = []
+        for path in sorted(conv_path.iterdir()):
+            if path.suffix == '.json':
+                try:
+                    content = path.read_text()
+                    event = Event.model_validate_json(content)
+                    raw_events.append(event.model_dump(mode='json'))
+                except Exception:
+                    _logger.exception('Error reading event %s', path)
+
+        _logger.info(
+            'Loaded %d events from %s', len(raw_events), conv_path
+        )
+        return raw_events
+
     async def export_conversation(
         self,
         conversation_id: UUID,
@@ -72,7 +120,6 @@ class WorkspaceExportService:
         app_conversation_service: AppConversationService,
         app_conversation_info_service: AppConversationInfoService,
         docker_sandbox_service: SandboxService,
-        event_service: EventService | None = None,
     ) -> ExportResult:
         if not jira_key or not jira_key.strip():
             return ExportResult(
@@ -145,27 +192,25 @@ class WorkspaceExportService:
 
         # 5. Fetch and serialise conversation events so they can be
         #    restored alongside the sandbox filesystem snapshot.
+        #    Read event files directly from the filesystem using the
+        #    conversation owner's user_id to match the path used by
+        #    the webhook handler (which stores events under
+        #    sandbox_record.created_by_user_id).
         events_json: str | None = None
-        if event_service:
-            try:
-                page = await event_service.search_events(conversation_id)
-                events_json = json.dumps(
-                    [event.model_dump(mode='json') for event in page.items],
-                    indent=2,
-                )
+        try:
+            raw_events = await self._load_events_from_disk(
+                conversation_id=conversation_id,
+                created_by_user_id=info.created_by_user_id,
+            )
+            if raw_events is not None:
+                events_json = json.dumps(raw_events, indent=2)
                 _logger.info(
                     'Serialised %d events for %s',
-                    len(page.items),
+                    len(raw_events),
                     conversation_id,
                 )
-            except Exception as exc:
-                _logger.exception(
-                    'Error fetching events for %s', conversation_id
-                )
-                return ExportResult(
-                    success=False,
-                    error_message=f'Events fetch error: {exc}',
-                )
+        except Exception:
+            _logger.exception('Error fetching events for %s', conversation_id)
 
         # 6. Store everything
         import time
