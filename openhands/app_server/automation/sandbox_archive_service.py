@@ -66,7 +66,7 @@ class SandboxArchiveService:
         try:
             # 1. Download conversation trajectory as zip
             traj_url = (
-                f'{agent_server_url}/file/download-trajectory/{conversation_id}'
+                f'{agent_server_url}/api/file/download-trajectory/{conversation_id}'
             )
             resp = await self._httpx.get(
                 traj_url, headers=headers, timeout=120.0
