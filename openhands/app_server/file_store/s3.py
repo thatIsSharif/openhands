@@ -38,21 +38,7 @@ def create_s3_client() -> Any:
     if _use_real_aws():
         return boto3.client('s3')
 
-    # In Docker: LocalStack is at 'localstack:4566'. On host: 'localhost:4566'.
-    # Prefer LOCALSTACK_ENDPOINT env, but fix 'localhost' when running in Docker
-    # (localhost inside Docker is the container itself, not the host).
-    in_docker = os.path.isdir('/app/.venv')
-    endpoint = os.getenv('LOCALSTACK_ENDPOINT')
-    if not endpoint:
-        endpoint = 'http://localstack:4566' if in_docker else 'http://localhost:4566'
-    elif in_docker and 'localhost' in endpoint:
-        endpoint = endpoint.replace('localhost', 'localstack')
-        logger.warning(
-            '[S3FileStore] LOCALSTACK_ENDPOINT=%s contains localhost; '
-            'rewriting to %s (localhost inside Docker is the container)',
-            os.getenv('LOCALSTACK_ENDPOINT'), endpoint,
-        )
-    logger.info('[S3FileStore] Creating client with endpoint=%s', endpoint)
+    endpoint = os.getenv('LOCALSTACK_ENDPOINT', 'http://localstack:4566')
     return boto3.client(
         's3',
         aws_access_key_id=os.getenv('AWS_ACCESS_KEY_ID', 'test'),
