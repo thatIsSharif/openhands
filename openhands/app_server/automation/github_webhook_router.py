@@ -646,6 +646,19 @@ async def _restore_archived_pr_conversation(
                 s3_store=s3_store,
                 httpx_client=httpx_client,
             )
+
+            # Clone the repo before restoring conversation (agent needs files)
+            parts = repository.split('/', 1)
+            if len(parts) == 2:
+                await SandboxArchiveService.clone_repo(
+                    httpx_client=httpx_client,
+                    agent_server_url=agent_url,
+                    session_api_key=sandbox.session_api_key,
+                    repo_owner=parts[0],
+                    repo_name=parts[1],
+                    branch=conv_info.selected_branch if conv_info else 'main',
+                )
+
             ok = await archive_svc.restore_into_sandbox(
                 agent_server_url=agent_url,
                 session_api_key=sandbox.session_api_key,

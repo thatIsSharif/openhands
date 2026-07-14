@@ -217,6 +217,51 @@ class SandboxArchiveService:
     # ── helpers ───────────────────────────────────────────────────────
 
     @staticmethod
+    async def clone_repo(
+        *,
+        httpx_client,
+        agent_server_url: str,
+        session_api_key: str,
+        repo_owner: str,
+        repo_name: str,
+        branch: str = 'main',
+        target_dir: str = '/workspace/project',
+        git_provider: str = 'github.com',
+    ) -> bool:
+        """Clone a git repository into the sandbox workspace.
+
+        Uses the agent server's ``/api/bash`` endpoint so the clone
+        happens directly inside the sandbox.  Requires ``GITHUB_PAT_TOKEN``
+        (or equivalent) to be configured in the sandbox environment.
+        """
+        clone_url = f'https://{git_provider}/{repo_owner}/{repo_name}.git'
+        cmd = (
+            f'rm -rf {target_dir} && '
+            f'git clone -b {branch} --single-branch '
+            f'{clone_url} {target_dir}'
+        )
+        headers = {'X-Session-API-Key': session_api_key}
+        try:
+            resp = await httpx_client.post(
+                f'{agent_server_url}/api/bash',
+                json={'command': cmd, 'run': True},
+                headers=headers,
+                timeout=300.0,
+            )
+            resp.raise_for_status()
+            logger.info(
+                '[SandboxArchive] Cloned %s/%s (branch=%s) → %s',
+                repo_owner, repo_name, branch, target_dir,
+            )
+            return True
+        except Exception:
+            logger.error(
+                '[SandboxArchive] Failed to clone %s/%s',
+                repo_owner, repo_name, exc_info=True,
+            )
+            return False
+
+    @staticmethod
     def build_mapping_key(
         *,
         jira_issue_key: str | None = None,
