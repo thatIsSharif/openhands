@@ -34,7 +34,7 @@ _app_conversation_info_service_dep = depends_app_conversation_info_service()
 _sandbox_service_dep = depends_sandbox_service()
 
 
-@router.post('/workspace-exports/{conversation_id}')
+@router.post('/workspace-exports/{conversation_id}', response_model=None)
 async def export_conversation(
     conversation_id: UUID,
     request: Request,
@@ -83,17 +83,16 @@ async def export_conversation(
     }
 
 
-@router.post('/workspace-restores/{jira_key}')
+@router.post('/workspace-restores/{jira_key}', response_model=None)
 async def restore_conversation(
     jira_key: str,
     new_sandbox_id: str | None = None,
-    request: Request | None = None,
     sandbox_service: SandboxService = _sandbox_service_dep,
 ) -> dict:
     """Restore a workspace from a previously exported snapshot."""
     state = InjectorState()
 
-    async with get_workspace_restore_service(state, request) as restore_service:
+    async with get_workspace_restore_service(state) as restore_service:
         result = await restore_service.restore_conversation(
             jira_key=jira_key,
             new_sandbox_id=new_sandbox_id or f'restored-{jira_key.lower()}',
@@ -115,10 +114,10 @@ async def restore_conversation(
     }
 
 
-@router.get('/workspace-exports/{jira_key}')
+@router.get('/workspace-exports/{jira_key}', response_model=None)
 async def check_export(
     jira_key: str,
-    request: Request | None = None,
+    request: Request,
 ) -> dict:
     """Check if an export exists for a given Jira key."""
     state = InjectorState()
@@ -127,10 +126,10 @@ async def check_export(
     return {'exists': exists, 'jira_key': jira_key}
 
 
-@router.delete('/workspace-exports/{jira_key}')
+@router.delete('/workspace-exports/{jira_key}', response_model=None)
 async def delete_export(
     jira_key: str,
-    request: Request | None = None,
+    request: Request,
 ) -> dict:
     """Delete a stored export for a given Jira key."""
     state = InjectorState()
