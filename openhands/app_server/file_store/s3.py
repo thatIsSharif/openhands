@@ -1,3 +1,4 @@
+import logging
 import os
 from typing import Any, TypedDict
 
@@ -7,6 +8,8 @@ from botocore.config import Config
 from pydantic import Field, PrivateAttr
 
 from openhands.app_server.file_store.files import FileStore
+
+logger = logging.getLogger(__name__)
 
 
 def _use_real_aws() -> bool:
@@ -82,6 +85,19 @@ class S3FileStore(FileStore):
 
     _client: Any = PrivateAttr(default=None)
     _resolved_bucket: str | None = PrivateAttr(default=None)
+    _bucket_checked: bool = PrivateAttr(default=False)
+
+    def _ensure_bucket(self) -> None:
+        """Create bucket if it doesn't exist (no-op if it does)."""
+        if self._bucket_checked:
+            return
+        self._bucket_checked = True
+        bucket = self._get_bucket_name()
+        try:
+            self.client.head_bucket(Bucket=bucket)
+        except Exception:
+            self.client.create_bucket(Bucket=bucket)
+            logger.info('[S3FileStore] Created bucket %s', bucket)
 
     def _get_bucket_name(self) -> str:
         """Get bucket name, falling back to environment variable if not set."""
@@ -97,6 +113,7 @@ class S3FileStore(FileStore):
         return self._client
 
     def write(self, path: str, contents: str | bytes) -> None:
+        self._ensure_bucket()
         try:
             as_bytes = (
                 contents.encode('utf-8') if isinstance(contents, str) else contents

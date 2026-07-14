@@ -29,11 +29,11 @@ services:
 
       # S3 persistence for automation archive/restore
       - USE_AWS_S3=${USE_AWS_S3:-false}
-      - LOCALSTACK_ENDPOINT=${LOCALSTACK_ENDPOINT:-http://localhost:4566}
-      - AWS_S3_BUCKET=${AWS_S3_BUCKET}
+      - LOCALSTACK_ENDPOINT=${LOCALSTACK_ENDPOINT:-http://localstack:4566}
+      - AWS_S3_BUCKET=${AWS_S3_BUCKET:-openhands-automation-archive}
       - AWS_REGION=${AWS_REGION:-us-east-1}
-      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
-      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-test}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-test}
 
       # GitHub PAT for cloning repos
       - GITHUB_PAT_TOKEN=${GITHUB_PAT_TOKEN}
@@ -59,3 +59,28 @@ services:
     pull_policy: build
     stdin_open: true
     tty: true
+    depends_on:
+      localstack:
+        condition: service_healthy
+
+  # ── LocalStack S3 (for archive/restore testing) ──────────────────
+  localstack:
+    image: localstack/localstack:latest
+    container_name: localstack
+    ports:
+      - "4566:4566"
+    environment:
+      - SERVICES=s3
+      - AWS_DEFAULT_REGION=us-east-1
+      - AWS_ACCESS_KEY_ID=test
+      - AWS_SECRET_ACCESS_KEY=test
+    volumes:
+      - localstack-data:/var/lib/localstack
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4566/_localstack/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  localstack-data:
