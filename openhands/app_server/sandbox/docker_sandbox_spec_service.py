@@ -25,10 +25,10 @@ _global_docker_client: docker.DockerClient | None = None
 _logger = logging.getLogger(__name__)
 
 
-def get_docker_client() -> docker.DockerClient:
+def get_docker_client(timeout: int | None = None) -> docker.DockerClient:
     global _global_docker_client
     if _global_docker_client is None:
-        _global_docker_client = docker.from_env()
+        _global_docker_client = docker.from_env(timeout=timeout or 300)
     return _global_docker_client
 
 

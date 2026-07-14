@@ -61,7 +61,7 @@ class WorkspaceExportService:
 
     @staticmethod
     def _get_docker_client() -> docker.DockerClient:
-        return docker.from_env()
+        return docker.from_env(timeout=300)
 
     async def export_conversation(
         self,
