@@ -215,4 +215,154 @@ class AutomationEventCallbackProcessor(EventCallbackProcessor):
                 f'{conversation_id}:', exc_info=True,
             )
 
+    @staticmethod
+    async def poll_and_archive(
+        state,
+        request,
+        conversation_id: str,
+        execution_id: str,
+        jira_issue_key: str | None = None,
+        repository: str | None = None,
+        pr_number: int | None = None,
+        poll_interval: float = 10.0,
+        max_wait: float = 3600.0,
+    ) -> None:
+        """Poll agent server until conversation finishes, then archive.
 
+        This bypasses the event webhook pipeline entirely.  It polls
+        ``GET /api/conversations/{id}`` on the agent server, waits for
+        a terminal execution_status, and then archives + destroys the
+        sandbox directly.
+        """
+        import asyncio
+        from uuid import UUID
+
+        from openhands.app_server.config import (
+            get_app_conversation_info_service,
+            get_httpx_client,
+            get_sandbox_service,
+        )
+        from openhands.app_server.file_store.s3 import S3FileStore
+        from openhands.app_server.sandbox.sandbox_models import AGENT_SERVER
+        from openhands.app_server.utils.docker_utils import (
+            replace_localhost_hostname_for_docker,
+        )
+
+        elapsed = 0.0
+        last_status: str | None = None
+
+        while elapsed < max_wait:
+            await asyncio.sleep(poll_interval)
+            elapsed += poll_interval
+
+            try:
+                async with (
+                    get_app_conversation_info_service(state, request) as info_svc,
+                    get_httpx_client(state, request) as http,
+                ):
+                    info = await info_svc.get_app_conversation_info(
+                        UUID(conversation_id)
+                    )
+                    if not info or not info.sandbox_id:
+                        logger.warning(
+                            '[Automation] poll: no conversation info for %s',
+                            conversation_id,
+                        )
+                        return
+
+                    async with get_sandbox_service(state, request) as sandbox_svc:
+                        sandbox = await sandbox_svc.get_sandbox(info.sandbox_id)
+                        if not sandbox:
+                            logger.warning(
+                                '[Automation] poll: sandbox %s not found',
+                                info.sandbox_id,
+                            )
+                            return
+
+                        agent_url = None
+                        for eu in sandbox.exposed_urls or []:
+                            if eu.name == AGENT_SERVER:
+                                agent_url = eu.url
+                                break
+                        if not agent_url:
+                            return
+                        agent_url = replace_localhost_hostname_for_docker(agent_url)
+
+                        resp = await http.get(
+                            f'{agent_url}/api/conversations/{conversation_id}',
+                            headers={
+                                'X-Session-API-Key': (
+                                    sandbox.session_api_key or ''
+                                ),
+                            },
+                        )
+                        if resp.status_code != 200:
+                            continue
+
+                        data = resp.json()
+                        status = data.get('execution_status', '')
+                        if status != last_status:
+                            last_status = status
+                            logger.info(
+                                '[Automation] poll: conversation %s status=%s '
+                                '(elapsed=%.0fs)',
+                                conversation_id, status, elapsed,
+                            )
+
+                        if status in ('finished', 'error', 'stopped', 'stuck'):
+                            logger.info(
+                                '[Automation] poll: conversation %s terminal, '
+                                'archiving...', conversation_id,
+                            )
+                            store = ExecutionStore()
+                            owner, repo = None, None
+                            if repository:
+                                parts = repository.split('/')
+                                if len(parts) == 2:
+                                    owner, repo = parts[0], parts[1]
+                                else:
+                                    repo = repository
+
+                            mapping_key = (
+                                SandboxArchiveService.build_mapping_key(
+                                    jira_issue_key=jira_issue_key,
+                                    owner=owner,
+                                    repo=repo,
+                                    pr_number=pr_number,
+                                )
+                            )
+
+                            s3_store = S3FileStore()
+                            archive_svc = SandboxArchiveService(
+                                s3_store=s3_store,
+                                httpx_client=http,
+                            )
+                            s3_key = await archive_svc.archive_and_cleanup(
+                                agent_server_url=agent_url,
+                                session_api_key=sandbox.session_api_key,
+                                sandbox_id=info.sandbox_id,
+                                conversation_id=conversation_id,
+                                execution_id=execution_id,
+                                mapping_key=mapping_key,
+                                sandbox_service=sandbox_svc,
+                            )
+                            if s3_key:
+                                await store.set_archive_location(
+                                    execution_id, s3_key,
+                                )
+                                logger.info(
+                                    '[Automation] poll: archived %s → %s',
+                                    execution_id, s3_key,
+                                )
+                            return
+
+            except Exception:
+                logger.error(
+                    '[Automation] poll error (%.0fs):', elapsed, exc_info=True,
+                )
+                # continue polling on transient errors
+
+        logger.warning(
+            '[Automation] poll: conversation %s did not finish within %.0fs',
+            conversation_id, max_wait,
+        )

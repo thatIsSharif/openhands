@@ -15,6 +15,7 @@ Supports:
 
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 import traceback
@@ -191,6 +192,12 @@ async def _handle_comment_created(
             f'via @openhands comment: {result.get("status")} '
             f'(execution: {result.get("execution_id", "N/A")})'
         )
+
+        # Start background polling for archive
+        if result.get('status') == 'running' and result.get('conversation_id'):
+            asyncio.create_task(
+                _poll_execution_for_archive(request, result)
+            )
         return True
 
     conversation_id = conversation.id
@@ -449,6 +456,25 @@ async def _process_jira_event(
                 f'[Automation] Jira event processed: multi '
                 f'({len(executions)} executions: {ids})',
             )
+            # Start background polling for each execution
+            for exec_info in executions:
+                if exec_info.get('conversation_id') and exec_info.get('execution_id'):
+                    asyncio.create_task(
+                        _poll_execution_for_archive(
+                            request, result, exec_info,
+                        )
+                    )
+        elif result.get('status') == 'running':
+            logger.info(
+                f'[Automation] Jira event processed: {result.get("status")} '
+                f'(execution: {result.get("execution_id", "N/A")})',
+            )
+            if result.get('conversation_id'):
+                asyncio.create_task(
+                    _poll_execution_for_archive(
+                        request, result,
+                    )
+                )
         else:
             logger.info(
                 f'[Automation] Jira event processed: {result.get("status")} '
@@ -457,6 +483,44 @@ async def _process_jira_event(
 
     except Exception:
         logger.error(traceback.format_exc())
+
+
+async def _poll_execution_for_archive(
+    request: Request,
+    result: dict,
+    exec_info: dict | None = None,
+) -> None:
+    """Background task: poll for conversation completion then archive.
+
+    Bypasses the event webhook pipeline entirely by polling the agent
+    server's ``GET /api/conversations/{id}`` endpoint directly.  When the
+    conversation reaches a terminal state, archives to S3 and destroys
+    the sandbox.
+    """
+    from .callback_processors import AutomationEventCallbackProcessor
+
+    conv_id = (
+        exec_info.get('conversation_id')
+        if exec_info
+        else result.get('conversation_id')
+    )
+    exec_id = (
+        exec_info.get('execution_id')
+        if exec_info
+        else result.get('execution_id')
+    )
+    if not conv_id or not exec_id:
+        return
+
+    await AutomationEventCallbackProcessor.poll_and_archive(
+        state=request.state,
+        request=request,
+        conversation_id=str(conv_id),
+        execution_id=str(exec_id),
+        jira_issue_key=result.get('issue_key'),
+        repository=exec_info.get('repository') if exec_info else result.get('repository'),
+        pr_number=exec_info.get('pr_number') if exec_info else result.get('pr_number'),
+    )
 
 
 @router.post('/comment')

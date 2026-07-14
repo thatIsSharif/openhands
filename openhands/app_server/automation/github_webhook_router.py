@@ -217,6 +217,24 @@ async def _run_github_background(
             f'{result.get("status")} '
             f'(execution: {result.get("execution_id", "N/A")})',
         )
+
+        # Start background polling for archive on successful conversation start
+        if result.get('status') == 'running' and result.get('conversation_id'):
+            import asyncio
+
+            from .callback_processors import AutomationEventCallbackProcessor
+
+            asyncio.create_task(
+                AutomationEventCallbackProcessor.poll_and_archive(
+                    state=request.state,
+                    request=request,
+                    conversation_id=str(result['conversation_id']),
+                    execution_id=str(result['execution_id']),
+                    repository=result.get('repository'),
+                    pr_number=result.get('pr_number'),
+                )
+            )
+
     except Exception as e:
         logger.error(f'[Automation] GitHub {handler_name} processing failed: {e}')
 
