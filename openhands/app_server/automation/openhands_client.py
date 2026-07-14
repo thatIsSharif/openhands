@@ -51,6 +51,7 @@ class OpenHandsClient:
         repository: str | None = None,
         branch: str | None = None,
         llm_model: str | None = None,
+        sandbox_id: str | None = None,
     ) -> str | None:
         # Look up execution record for task-level rate limits
         max_iterations: int | None = None
@@ -98,6 +99,7 @@ class OpenHandsClient:
             max_budget_per_task=max_budget,
 
             processors=processors,
+            sandbox_id=sandbox_id,
             jira_issue_key=jira_issue_key,
             github_pr=github_pr_urls or [],
             llm_model=llm_model,

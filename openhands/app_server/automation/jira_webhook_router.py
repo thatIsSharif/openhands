@@ -15,14 +15,20 @@ Supports:
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import traceback
+import uuid
 
 from fastapi import APIRouter, BackgroundTasks, Request
 from pydantic import BaseModel
 
 from openhands.agent_server.models import OpenHandsModel
+from openhands.app_server.automation.execution_models import (
+    ExecutionState,
+    SourceType,
+)
 from openhands.app_server.automation.execution_service import (
     ExecutionService,
 )
@@ -41,6 +47,7 @@ from openhands.app_server.automation.openhands_client import (
 from openhands.app_server.automation.prompt_renderer import render_prompt
 from openhands.app_server.config import (
     get_app_conversation_info_service,
+    get_app_conversation_service,
     get_httpx_client,
     get_sandbox_service,
 )
@@ -127,6 +134,95 @@ async def handle_jira_webhook(
     )
 
 
+async def _try_restore_from_snapshot(
+    issue_key: str, request: Request
+) -> str | None:
+    """Try to restore a sandbox from a saved export snapshot.
+
+    Returns the restored sandbox_id on success, or None if no snapshot
+    exists or any step fails (the caller falls through to creating a
+    fresh conversation).
+    """
+    from openhands.app_server.config import get_default_persistence_dir
+    from openhands.app_server.workspace_export.local_storage import LocalStorage
+
+    export_dir = os.getenv(
+        'WORKSPACE_EXPORT_DIR',
+        str(get_default_persistence_dir() / 'exports'),
+    )
+    storage = LocalStorage(export_dir=export_dir)
+
+    if not await storage.exists(issue_key):
+        logger.info(
+            f'[Automation] No saved export for {issue_key}'
+        )
+        return None
+
+    logger.info(
+        f'[Automation] Found saved export for {issue_key}, restoring…'
+    )
+
+    # 1. Load the image tar from storage
+    image_tar = await storage.load_image_tar(issue_key)
+    if not image_tar:
+        logger.warning(
+            f'[Automation] Export for {issue_key} has no image tar'
+        )
+        return None
+
+    # 2. Docker load the image
+    import docker
+
+    try:
+        docker_client = docker.from_env(timeout=300)
+        loaded = docker_client.images.load(image_tar)
+        if not loaded:
+            logger.warning(
+                f'[Automation] Docker load returned no images for {issue_key}'
+            )
+            return None
+        loaded_tag = loaded[0].tags[0] if loaded[0].tags else None
+        if not loaded_tag:
+            logger.warning(
+                f'[Automation] Loaded image for {issue_key} has no tag'
+            )
+            return None
+        logger.info(
+            f'[Automation] Loaded image {loaded_tag} for {issue_key}'
+        )
+    except Exception as exc:
+        logger.exception(
+            f'[Automation] Docker load failed for {issue_key}: {exc}'
+        )
+        return None
+
+    # 3. Create a new sandbox from the loaded image
+    try:
+        new_sandbox_id = f'restored-{uuid.uuid4().hex[:12]}'
+        async with get_sandbox_service(
+            request.state, request
+        ) as sandbox_service:
+            sandbox_info = await sandbox_service.restore_from_snapshot(
+                loaded_tag, new_sandbox_id
+            )
+            if not sandbox_info:
+                logger.warning(
+                    f'[Automation] restore_from_snapshot returned None '
+                    f'for {issue_key}'
+                )
+                return None
+            logger.info(
+                f'[Automation] Restored sandbox {new_sandbox_id} '
+                f'from image {loaded_tag} for {issue_key}'
+            )
+            return new_sandbox_id
+    except Exception as exc:
+        logger.exception(
+            f'[Automation] Sandbox restore failed for {issue_key}: {exc}'
+        )
+        return None
+
+
 async def _handle_comment_created(
     payload: dict,
     request: Request,
@@ -167,9 +263,72 @@ async def _handle_comment_created(
         conversation = await info_service.get_conversation_by_jira_issue_key(issue_key)
 
     if not conversation:
+        # Check if a saved export exists to restore from
+        restored_sandbox_id = await _try_restore_from_snapshot(
+            issue_key, request
+        )
+        if restored_sandbox_id:
+            # ── Restore path ──────────────────────────────────────────
+            store = ExecutionStore()
+            execution_service = ExecutionService(store=store)
+            openhands_client = OpenHandsClient()
+
+            # Compute event ID from the comment payload for idempotency
+            from openhands.app_server.automation.jira_automation_service import (
+                compute_jira_event_id,
+            )
+
+            event_id = compute_jira_event_id(payload)
+
+            execution_record, is_new = await execution_service.create_execution(
+                source_type=SourceType.JIRA,
+                source_event_id=event_id,
+                jira_issue_key=issue_key,
+            )
+            execution_id = execution_record.execution_id
+
+            if is_new:
+                await execution_service.transition_state(
+                    execution_id, ExecutionState.QUEUED
+                )
+
+            # Build the initial prompt from the comment
+            issue_summary = (
+                issue.get('fields', {}).get('summary', '')
+                or ''
+            )
+            prompt = (
+                f'[Conversation restored from snapshot]\n\n'
+                f'Issue: {issue_key} — {issue_summary}\n'
+                f'New comment from Jira:\n\n{comment_body}'
+            )
+
+            conv_id = await openhands_client.create_conversation(
+                state=request.state,
+                request=request,
+                prompt=prompt,
+                title=f'Restored: {issue_key}',
+                execution_id=execution_id,
+                jira_issue_key=issue_key,
+                sandbox_id=restored_sandbox_id,
+            )
+
+            if conv_id:
+                logger.info(
+                    f'[Automation] Restored conversation {conv_id} for '
+                    f'{issue_key} from snapshot (sandbox: {restored_sandbox_id})'
+                )
+                return True
+
+            logger.warning(
+                f'[Automation] Restore succeeded but conversation '
+                f'creation failed for {issue_key}, falling through'
+            )
+
+        # ── No snapshot or restore failed → create fresh ──────────────
         logger.info(
-            f'[Automation] No existing conversation found for {issue_key}, '
-            'creating a new conversation'
+            f'[Automation] No existing conversation or snapshot '
+            f'found for {issue_key}, creating a new conversation'
         )
         store = ExecutionStore()
         execution_service = ExecutionService(store=store)
