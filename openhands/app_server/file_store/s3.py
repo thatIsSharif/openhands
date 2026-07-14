@@ -38,7 +38,7 @@ def create_s3_client() -> Any:
     if _use_real_aws():
         return boto3.client('s3')
 
-    endpoint = os.getenv('LOCALSTACK_ENDPOINT', 'http://localhost:4566')
+    endpoint = os.getenv('LOCALSTACK_ENDPOINT', 'http://localstack:4566')
     return boto3.client(
         's3',
         aws_access_key_id=os.getenv('AWS_ACCESS_KEY_ID', 'test'),
