@@ -583,12 +583,18 @@ class DockerSandboxService(SandboxService):
             timestamp = int(time.time())
             snapshot_name = f'oh-snapshot-{sandbox_id}-{timestamp}'.lower()
 
+            # Labels must be passed inside the ``conf`` dict because the
+            # Docker Engine API commit endpoint does not accept ``labels``
+            # as a top-level parameter (docker-py passes **kwargs straight
+            # through and will reject unknown arguments).
             container.commit(
                 repository=snapshot_name,
-                labels={
-                    'sandbox_id': sandbox_id,
-                    'snapshot_name': snapshot_name,
-                    'created_at': str(timestamp),
+                conf={
+                    'Labels': {
+                        'sandbox_id': sandbox_id,
+                        'snapshot_name': snapshot_name,
+                        'created_at': str(timestamp),
+                    }
                 },
             )
 
