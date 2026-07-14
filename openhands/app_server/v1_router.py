@@ -11,8 +11,8 @@ from openhands.app_server.automation.jira_webhook_router import (
     router as jira_webhook_router,
 )
 from openhands.app_server.config_api.config_router import router as config_router
-from openhands.app_server.workspace_export import (
-    export_restore_router,
+from openhands.app_server.workspace_export.export_restore_router import (
+    router as export_restore_router,
 )
 from openhands.app_server.event import event_router
 from openhands.app_server.event_callback import (
