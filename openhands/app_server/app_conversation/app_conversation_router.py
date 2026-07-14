@@ -61,6 +61,7 @@ from openhands.app_server.config import (
     depends_sandbox_spec_service,
     depends_user_context,
     get_app_conversation_service,
+    get_workspace_export_service,
 )
 from openhands.app_server.sandbox.sandbox_models import (
     AGENT_SERVER,
@@ -929,41 +930,11 @@ async def delete_app_conversation(
         )
         sandbox_is_shared = conversation_count > 1
 
-    # Delete the conversation (skip agent server DELETE if sandbox is shared)
-    deleted = await app_conversation_service.delete_app_conversation(
-        conversation_uuid,
-        skip_agent_server_delete=sandbox_is_shared,
-    )
-    if not deleted:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, 'Failed to delete conversation')
-
-    # Analytics: conversation deleted (V1)
-    try:
-        analytics = get_analytics_service()
-        if analytics and app_conversation_info.created_by_user_id:
-            ctx = await resolve_analytics_context(
-                app_conversation_info.created_by_user_id
-            )
-            analytics.track_conversation_deleted(
-                ctx=ctx,
-                conversation_id=conversation_id,
-            )
-    except Exception:
-        logger.exception('analytics:conversation_deleted:failed')
-
-    # Commit the deletion
-    await db_session.commit()
-
-    # If the conversation has a jira_issue_key, trigger a workspace export
-    # BEFORE the sandbox is deleted.  This handles the case where the
-    # conversation never reached a terminal execution state (common in
-    # local development) – the user's manual delete serves as the trigger.
+    # If the conversation has a jira_issue_key and owns the sandbox, snapshot
+    # BEFORE the DB record is deleted (export_service reads it from DB).
     jira_key = app_conversation_info.jira_issue_key
-    if jira_key and sandbox_id:
+    if jira_key and sandbox_id and not sandbox_is_shared:
         try:
-            from openhands.app_server.config import get_workspace_export_service
-            from openhands.app_server.services.injector import InjectorState
-
             state = InjectorState()
             async with get_workspace_export_service(state, request) as export_service:
                 export_result = await export_service.export_conversation(
@@ -990,6 +961,31 @@ async def delete_app_conversation(
                 'Workspace export on delete raised for %s',
                 jira_key,
             )
+
+    # Delete the conversation (skip agent server DELETE if sandbox is shared)
+    deleted = await app_conversation_service.delete_app_conversation(
+        conversation_uuid,
+        skip_agent_server_delete=sandbox_is_shared,
+    )
+    if not deleted:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, 'Failed to delete conversation')
+
+    # Analytics: conversation deleted (V1)
+    try:
+        analytics = get_analytics_service()
+        if analytics and app_conversation_info.created_by_user_id:
+            ctx = await resolve_analytics_context(
+                app_conversation_info.created_by_user_id
+            )
+            analytics.track_conversation_deleted(
+                ctx=ctx,
+                conversation_id=conversation_id,
+            )
+    except Exception:
+        logger.exception('analytics:conversation_deleted:failed')
+
+    # Commit the deletion
+    await db_session.commit()
 
     # Keep connections open for background task
     set_db_session_keep_open(request.state, True)
