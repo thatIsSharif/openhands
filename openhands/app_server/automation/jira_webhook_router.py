@@ -133,6 +133,59 @@ async def handle_jira_webhook(
     )
 
 
+async def _load_events_for_restore(issue_key: str) -> str | None:
+    """Load serialized conversation events from the saved export."""
+    from openhands.app_server.config import get_default_persistence_dir
+    from openhands.app_server.workspace_export.local_storage import LocalStorage
+
+    export_dir = os.getenv(
+        'WORKSPACE_EXPORT_DIR',
+        str(get_default_persistence_dir() / 'exports'),
+    )
+    storage = LocalStorage(export_dir=export_dir)
+    return await storage.load_events_json(issue_key)
+
+
+async def _inject_events(
+    conversation_id: str,
+    events_json: str,
+    request: Request,
+) -> None:
+    """Deserialize saved events and inject them into a conversation."""
+    import json
+
+    from openhands.app_server.config import get_event_service
+    from openhands.sdk.event import Event
+
+    try:
+        raw_events = json.loads(events_json)
+        if not raw_events:
+            return
+
+        events = [Event.model_validate(e) for e in raw_events]
+
+        async with get_event_service(
+            request.state, request
+        ) as event_service:
+            from uuid import UUID as UUIDType
+
+            conv_uuid = UUIDType(conversation_id)
+            for event in events:
+                await event_service.save_event(conv_uuid, event)
+
+        logger.info(
+            '[Automation] Injected %d events into conversation %s',
+            len(events),
+            conversation_id,
+        )
+    except Exception as exc:
+        logger.exception(
+            '[Automation] Failed to inject events into %s: %s',
+            conversation_id,
+            exc,
+        )
+
+
 async def _try_restore_from_snapshot(
     issue_key: str, request: Request
 ) -> dict | None:
@@ -344,6 +397,17 @@ async def _handle_comment_created(
             )
 
             if conv_id:
+                # Inject saved conversation events into the new conversation
+                restore_events_json = await _load_events_for_restore(
+                    issue_key
+                )
+                if restore_events_json:
+                    await _inject_events(
+                        conv_id,
+                        restore_events_json,
+                        request,
+                    )
+
                 logger.info(
                     f'[Automation] Restored conversation {conv_id} for '
                     f'{issue_key} from snapshot (sandbox: {restored_sandbox_id})'

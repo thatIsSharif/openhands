@@ -127,6 +127,7 @@ class ExportOnCompletionCallbackProcessor(EventCallbackProcessor):
         from openhands.app_server.config import (
             get_app_conversation_info_service,
             get_app_conversation_service,
+            get_event_service,
             get_sandbox_service,
             get_workspace_export_service,
         )
@@ -143,23 +144,27 @@ class ExportOnCompletionCallbackProcessor(EventCallbackProcessor):
                     async with get_workspace_export_service(
                         self._state, self._request
                     ) as export_service:
-                        result = await export_service.export_conversation(
-                            conversation_id=conversation_id,
-                            jira_key=jira_key,
-                            app_conversation_service=app_conversation_service,
-                            app_conversation_info_service=app_conversation_info_service,
-                            docker_sandbox_service=sandbox_service,
-                        )
-                        if result.success:
-                            _logger.info(
-                                'Workspace export succeeded for %s (tag: %s)',
-                                jira_key,
-                                result.snapshot_tag,
+                        async with get_event_service(
+                            self._state, self._request
+                        ) as event_service:
+                            result = await export_service.export_conversation(
+                                conversation_id=conversation_id,
+                                jira_key=jira_key,
+                                app_conversation_service=app_conversation_service,
+                                app_conversation_info_service=app_conversation_info_service,
+                                docker_sandbox_service=sandbox_service,
+                                event_service=event_service,
                             )
-                        else:
-                            _logger.warning(
-                                'Workspace export failed for %s: %s',
-                                jira_key,
-                                result.error_message,
-                            )
+                            if result.success:
+                                _logger.info(
+                                    'Workspace export succeeded for %s (tag: %s)',
+                                    jira_key,
+                                    result.snapshot_tag,
+                                )
+                            else:
+                                _logger.warning(
+                                    'Workspace export failed for %s: %s',
+                                    jira_key,
+                                    result.error_message,
+                                )
 

@@ -6,8 +6,9 @@ Steps
 2. Docker commit the sandbox container to an image.
 3. Docker save the image to a tar byte stream.
 4. Serialise the conversation JSON.
-5. Store everything via the configured ``StorageBackend``.
-6. Delete the sandbox container to free resources.
+5. Fetch and serialise conversation events.
+6. Store everything via the configured ``StorageBackend``.
+7. Delete the sandbox container to free resources.
 """
 
 from __future__ import annotations
@@ -27,6 +28,7 @@ from openhands.app_server.app_conversation.app_conversation_info_service import 
 from openhands.app_server.app_conversation.app_conversation_service import (
     AppConversationService,
 )
+from openhands.app_server.event.event_service import EventService
 from openhands.app_server.sandbox.sandbox_service import SandboxService
 from openhands.app_server.workspace_export.storage_backend import (
     SnapshotMetadata,
@@ -70,6 +72,7 @@ class WorkspaceExportService:
         app_conversation_service: AppConversationService,
         app_conversation_info_service: AppConversationInfoService,
         docker_sandbox_service: SandboxService,
+        event_service: EventService | None = None,
     ) -> ExportResult:
         if not jira_key or not jira_key.strip():
             return ExportResult(
@@ -140,7 +143,31 @@ class WorkspaceExportService:
                 error_message=f'Serialisation error: {exc}',
             )
 
-        # 5. Store everything
+        # 5. Fetch and serialise conversation events so they can be
+        #    restored alongside the sandbox filesystem snapshot.
+        events_json: str | None = None
+        if event_service:
+            try:
+                page = await event_service.search_events(conversation_id)
+                events_json = json.dumps(
+                    [event.model_dump(mode='json') for event in page.items],
+                    indent=2,
+                )
+                _logger.info(
+                    'Serialised %d events for %s',
+                    len(page.items),
+                    conversation_id,
+                )
+            except Exception as exc:
+                _logger.exception(
+                    'Error fetching events for %s', conversation_id
+                )
+                return ExportResult(
+                    success=False,
+                    error_message=f'Events fetch error: {exc}',
+                )
+
+        # 6. Store everything
         import time
 
         # Store the git provider string for backward-compat serialisation
@@ -173,7 +200,15 @@ class WorkspaceExportService:
                 error_message='Storage backend failed to save snapshot',
             )
 
-        # 6. Delete the sandbox to free resources
+        # Save events alongside the snapshot if they were serialised.
+        if events_json:
+            events_ok = await self._storage.save_events_json(
+                jira_key, events_json
+            )
+            if not events_ok:
+                _logger.warning('Failed to save events for %s', jira_key)
+
+        # 7. Delete the sandbox to free resources
         try:
             await docker_sandbox_service.delete_sandbox(sandbox_id)
         except Exception as exc:

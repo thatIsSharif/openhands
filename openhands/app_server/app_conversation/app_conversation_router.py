@@ -61,6 +61,7 @@ from openhands.app_server.config import (
     depends_sandbox_spec_service,
     depends_user_context,
     get_app_conversation_service,
+    get_event_service,
     get_workspace_export_service,
 )
 from openhands.app_server.sandbox.sandbox_models import (
@@ -936,13 +937,18 @@ async def delete_app_conversation(
     if jira_key and sandbox_id and not sandbox_is_shared:
         try:
             state = InjectorState()
-            async with get_workspace_export_service(state, request) as export_service:
+            async with get_workspace_export_service(
+                state, request
+            ) as export_service, get_event_service(
+                state, request
+            ) as event_service:
                 export_result = await export_service.export_conversation(
                     conversation_id=conversation_uuid,
                     jira_key=jira_key,
                     app_conversation_service=app_conversation_service,
                     app_conversation_info_service=app_conversation_info_service,
                     docker_sandbox_service=sandbox_service,
+                    event_service=event_service,
                 )
                 if export_result.success:
                     logger.info(

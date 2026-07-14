@@ -6,7 +6,6 @@ import json
 import logging
 import re
 from pathlib import Path
-from typing import Optional
 
 from openhands.app_server.workspace_export.storage_backend import (
     SnapshotMetadata,
@@ -99,6 +98,32 @@ class LocalStorage(StorageBackend):
             return SnapshotMetadata.from_json(path.read_text())
         except (OSError, json.JSONDecodeError, KeyError):
             _logger.exception('Error reading metadata for %s', jira_key)
+            return None
+
+    async def save_events_json(
+        self, jira_key: str, events_json: str
+    ) -> bool:
+        """Save serialized conversation events alongside the snapshot."""
+        conv_dir = self._conversation_dir(jira_key)
+        conv_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            with open(conv_dir / 'events.json', 'w') as f:
+                f.write(events_json)
+            _logger.info('Saved events for %s', jira_key)
+            return True
+        except OSError as exc:
+            _logger.error('Failed to save events for %s: %s', jira_key, exc)
+            return False
+
+    async def load_events_json(self, jira_key: str) -> str | None:
+        """Load serialized conversation events for a snapshot."""
+        path = self._conversation_dir(jira_key) / 'events.json'
+        if not path.is_file():
+            return None
+        try:
+            return path.read_text()
+        except OSError:
+            _logger.exception('Error reading events for %s', jira_key)
             return None
 
     async def delete(self, jira_key: str) -> bool:
