@@ -19,9 +19,6 @@ from openhands.app_server.automation.budget_enforcement_processor import (
 from openhands.app_server.automation.callback_processors import (
     AutomationEventCallbackProcessor,
 )
-from openhands.app_server.workspace_export.export_processor import (
-    ExportOnCompletionCallbackProcessor,
-)
 from openhands.app_server.automation.execution_store import ExecutionStore
 from openhands.app_server.config import (
     get_app_conversation_service,
@@ -29,6 +26,9 @@ from openhands.app_server.config import (
 from openhands.app_server.integrations.service_types import ProviderType
 from openhands.app_server.utils.logger import (
     openhands_logger as logger,
+)
+from openhands.app_server.workspace_export.export_processor import (
+    ExportOnCompletionCallbackProcessor,
 )
 
 from .correlation import build_log_context
@@ -52,6 +52,7 @@ class OpenHandsClient:
         branch: str | None = None,
         llm_model: str | None = None,
         sandbox_id: str | None = None,
+        git_provider: ProviderType | None = None,
     ) -> str | None:
         # Look up execution record for task-level rate limits
         max_iterations: int | None = None
@@ -85,7 +86,7 @@ class OpenHandsClient:
 
             selected_repository=repository,
             selected_branch=branch or 'main',
-            git_provider=ProviderType.GITHUB,
+            git_provider=git_provider or ProviderType.GITHUB,
 
             initial_message=SendMessageRequest(
                 content=[

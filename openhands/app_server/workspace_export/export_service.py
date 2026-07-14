@@ -96,7 +96,6 @@ class WorkspaceExportService:
 
         # 2. Docker commit the sandbox container
         try:
-            tag = f'{self._snapshot_prefix}{jira_key.lower()}'
             snapshot_tag = await docker_sandbox_service.snapshot_sandbox(sandbox_id)
             if not snapshot_tag:
                 return ExportResult(
@@ -144,6 +143,12 @@ class WorkspaceExportService:
         # 5. Store everything
         import time
 
+        # Store the git provider string for backward-compat serialisation
+        git_provider_str = (
+            info.git_provider.value
+            if info.git_provider
+            else None
+        )
         metadata = SnapshotMetadata(
             jira_key=jira_key,
             snapshot_tag=snapshot_tag,
@@ -151,6 +156,9 @@ class WorkspaceExportService:
             conversation_id=str(conversation_id),
             llm_model=info.llm_model,
             sandbox_id=sandbox_id,
+            selected_repository=info.selected_repository,
+            selected_branch=info.selected_branch,
+            git_provider=git_provider_str,
         )
 
         ok = await self._storage.save_snapshot(

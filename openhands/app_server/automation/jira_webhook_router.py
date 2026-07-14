@@ -49,6 +49,7 @@ from openhands.app_server.config import (
     get_httpx_client,
     get_sandbox_service,
 )
+from openhands.app_server.integrations.service_types import ProviderType
 from openhands.app_server.sandbox.sandbox_models import SandboxStatus
 from openhands.app_server.sandbox.session_auth import validate_session_key
 from openhands.app_server.services.injector import InjectorState
@@ -134,12 +135,12 @@ async def handle_jira_webhook(
 
 async def _try_restore_from_snapshot(
     issue_key: str, request: Request
-) -> str | None:
+) -> dict | None:
     """Try to restore a sandbox from a saved export snapshot.
 
-    Returns the restored sandbox_id on success, or None if no snapshot
-    exists or any step fails (the caller falls through to creating a
-    fresh conversation).
+    Returns a dict with ``sandbox_id`` and original conversation metadata
+    (``selected_repository``, ``selected_branch``, ``git_provider``) on
+    success, or ``None`` if no snapshot exists or any step fails.
     """
     from openhands.app_server.config import get_default_persistence_dir
     from openhands.app_server.workspace_export.local_storage import LocalStorage
@@ -160,7 +161,10 @@ async def _try_restore_from_snapshot(
         f'[Automation] Found saved export for {issue_key}, restoring…'
     )
 
-    # 1. Load the image tar from storage
+    # 1. Load metadata from storage (used later for conversation creation)
+    metadata = await storage.load_metadata(issue_key)
+
+    # 2. Load the image tar from storage
     image_tar = await storage.load_image_tar(issue_key)
     if not image_tar:
         logger.warning(
@@ -168,7 +172,7 @@ async def _try_restore_from_snapshot(
         )
         return None
 
-    # 2. Docker load the image
+    # 3. Docker load the image
     import docker
 
     try:
@@ -194,7 +198,7 @@ async def _try_restore_from_snapshot(
         )
         return None
 
-    # 3. Create a new sandbox from the loaded image
+    # 4. Create a new sandbox from the loaded image
     try:
         new_sandbox_id = f'restored-{uuid.uuid4().hex[:12]}'
         async with get_sandbox_service(
@@ -213,7 +217,21 @@ async def _try_restore_from_snapshot(
                 f'[Automation] Restored sandbox {sandbox_info.id} '
                 f'from image {loaded_tag} for {issue_key}'
             )
-            return sandbox_info.id
+            return {
+                'sandbox_id': sandbox_info.id,
+                'selected_repository': (
+                    metadata.selected_repository if metadata else None
+                ),
+                'selected_branch': (
+                    metadata.selected_branch if metadata else None
+                ),
+                'git_provider': (
+                    metadata.git_provider if metadata else None
+                ),
+                'llm_model': (
+                    metadata.llm_model if metadata else None
+                ),
+            }
     except Exception as exc:
         logger.exception(
             f'[Automation] Sandbox restore failed for {issue_key}: {exc}'
@@ -262,10 +280,12 @@ async def _handle_comment_created(
 
     if not conversation:
         # Check if a saved export exists to restore from
-        restored_sandbox_id = await _try_restore_from_snapshot(
+        restore_result = await _try_restore_from_snapshot(
             issue_key, request
         )
-        if restored_sandbox_id:
+        if restore_result:
+            restored_sandbox_id = restore_result['sandbox_id']
+
             # ── Restore path ──────────────────────────────────────────
             store = ExecutionStore()
             execution_service = ExecutionService(store=store)
@@ -301,6 +321,14 @@ async def _handle_comment_created(
                 f'New comment from Jira:\n\n{comment_body}'
             )
 
+            # Resolve git_provider from the stored string
+            git_provider_str = restore_result.get('git_provider')
+            git_provider = (
+                ProviderType(git_provider_str)
+                if git_provider_str
+                else None
+            )
+
             conv_id = await openhands_client.create_conversation(
                 state=request.state,
                 request=request,
@@ -309,6 +337,10 @@ async def _handle_comment_created(
                 execution_id=execution_id,
                 jira_issue_key=issue_key,
                 sandbox_id=restored_sandbox_id,
+                repository=restore_result.get('selected_repository'),
+                branch=restore_result.get('selected_branch'),
+                llm_model=restore_result.get('llm_model'),
+                git_provider=git_provider,
             )
 
             if conv_id:

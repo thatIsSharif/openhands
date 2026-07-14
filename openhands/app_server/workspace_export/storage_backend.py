@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 from typing import Optional
 
 
@@ -19,6 +19,9 @@ class SnapshotMetadata:
     conversation_id: Optional[str] = None
     llm_model: Optional[str] = None
     sandbox_id: Optional[str] = None
+    selected_repository: Optional[str] = None
+    selected_branch: Optional[str] = None
+    git_provider: Optional[str] = None
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), indent=2)
