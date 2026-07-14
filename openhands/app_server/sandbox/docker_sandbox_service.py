@@ -222,14 +222,24 @@ class DockerSandboxService(SandboxService):
             )
             return None
 
-        # Read snapshot_name from container labels (set during commit)
+        # Read labels from the container (inherited from the image at creation).
+        # For restored containers, labels were set during snapshot_sandbox commit
+        # and contain the original sandbox_spec_id. For fresh containers, labels
+        # were set during start_sandbox.
         labels = container.attrs.get('Config', {}).get('Labels', {}) or {}
         snapshot_name = labels.get('snapshot_name', None)
+
+        # Use the stored sandbox_spec_id from labels when available (restored
+        # containers), falling back to the image tag for backward compat with
+        # fresh containers or snapshots taken before the label was added.
+        sandbox_spec_id = labels.get(
+            'sandbox_spec_id'
+        ) or container.image.tags[0]
 
         return SandboxInfo(
             id=container.name,
             created_by_user_id=None,
-            sandbox_spec_id=container.image.tags[0],
+            sandbox_spec_id=sandbox_spec_id,
             status=status,
             session_api_key=session_api_key,
             exposed_urls=exposed_urls,
@@ -583,6 +593,15 @@ class DockerSandboxService(SandboxService):
             timestamp = int(time.time())
             snapshot_name = f'oh-snapshot-{sandbox_id}-{timestamp}'.lower()
 
+            # Preserve the original sandbox_spec_id from the container's labels
+            # so restored containers can be matched to a known sandbox spec.
+            container_labels = (
+                container.attrs.get('Config', {}).get('Labels', {}) or {}
+            )
+            original_sandbox_spec_id = container_labels.get(
+                'sandbox_spec_id', ''
+            )
+
             # Labels must be passed inside the ``conf`` dict because the
             # Docker Engine API commit endpoint does not accept ``labels``
             # as a top-level parameter (docker-py passes **kwargs straight
@@ -592,6 +611,7 @@ class DockerSandboxService(SandboxService):
                 conf={
                     'Labels': {
                         'sandbox_id': sandbox_id,
+                        'sandbox_spec_id': original_sandbox_spec_id,
                         'snapshot_name': snapshot_name,
                         'created_at': str(timestamp),
                     }
@@ -694,6 +714,17 @@ class DockerSandboxService(SandboxService):
             # Determine network mode
             network_mode = 'host' if self.use_host_network else None
 
+            # Read sandbox_spec_id from the snapshot image labels so it can be
+            # stored in the restored container's labels, allowing the sandbox
+            # spec lookup to match the original (pre-snapshot) image.
+            snapshot_image = self.docker_client.images.get(snapshot_name)
+            image_labels = (
+                snapshot_image.attrs.get('Config', {}).get('Labels', {}) or {}
+            )
+            original_sandbox_spec_id = image_labels.get(
+                'sandbox_spec_id', ''
+            )
+
             # Create and start the container from snapshot
             container = self.docker_client.containers.run(
                 image=snapshot_name,
@@ -704,6 +735,7 @@ class DockerSandboxService(SandboxService):
                 volumes=volumes,
                 labels={
                     'sandbox_id': sandbox_id,
+                    'sandbox_spec_id': original_sandbox_spec_id,
                     'snapshot_name': snapshot_name,
                     'restored_from': snapshot_name,
                 },
