@@ -5,8 +5,9 @@ Follows the OSS pattern: Stored* classes with Base from sql_utils.
 
 from datetime import datetime
 
-from sqlalchemy import BigInteger, DateTime, Integer, String, Text, text
+from sqlalchemy import BigInteger, DateTime, Integer, String, Text, event, text
 from sqlalchemy.dialects.postgresql import ARRAY
+from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Mapped, mapped_column
 
 from openhands.app_server.utils.sql_utils import Base
@@ -176,3 +177,38 @@ class StoredReviewIteration(Base):
         server_default=text('CURRENT_TIMESTAMP'),
         nullable=False,
     )
+
+
+# ── self-healing column migrations (SQLite) ──────────────────────────
+#
+# When a new column is added to a model and the SQLite database was
+# created by an older schema version, the column does not exist in the
+# table.  Rather than failing with "no such column", we add any missing
+# columns on engine connect.  This works around the Docker rebuild /
+# alembic upgrade ordering problem in dev and single-instance deployments.
+
+_MISSING_COLUMNS: dict[str, tuple[str, ...]] = {
+    'executions': ('archive_location',),
+}
+
+
+@event.listens_for(Engine, 'connect')
+def _add_missing_columns(dbapi_connection, connection_record):
+    """Add any columns declared in the model but missing in SQLite."""
+    try:
+        import sqlite3
+        if not isinstance(dbapi_connection, sqlite3.Connection):
+            return
+    except Exception:
+        return
+
+    cursor = dbapi_connection.cursor()
+    for table_name, columns in _MISSING_COLUMNS.items():
+        cursor.execute(f'PRAGMA table_info({table_name})')
+        existing = {row[1] for row in cursor.fetchall()}
+        for col in columns:
+            if col not in existing:
+                cursor.execute(
+                    f'ALTER TABLE {table_name} ADD COLUMN {col} TEXT'
+                )
+    cursor.close()
