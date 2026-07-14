@@ -608,6 +608,11 @@ class DockerSandboxService(SandboxService):
                 f'Failed to snapshot sandbox {sandbox_id}: {e}'
             )
             return None
+        except Exception as e:
+            _logger.warning(
+                f'Unexpected error snapshotting sandbox {sandbox_id}: {e}'
+            )
+            return None
 
     async def restore_from_snapshot(
         self, snapshot_name: str, sandbox_id: str
@@ -738,12 +743,20 @@ class DockerSandboxService(SandboxService):
             if not sandbox_id.startswith(self.container_name_prefix):
                 return False
 
-            # Snapshot before destroy for disaster recovery
-            snapshot_name = await self.snapshot_sandbox(sandbox_id)
-            if snapshot_name:
-                _logger.info(
-                    f'Created pre-delete snapshot {snapshot_name} '
-                    f'for sandbox {sandbox_id}'
+            # Snapshot before destroy for disaster recovery.
+            # Best-effort: if snapshot fails (timeout, etc.), still delete.
+            try:
+                snapshot_name = await self.snapshot_sandbox(sandbox_id)
+                if snapshot_name:
+                    _logger.info(
+                        f'Created pre-delete snapshot {snapshot_name} '
+                        f'for sandbox {sandbox_id}'
+                    )
+            except Exception:
+                _logger.warning(
+                    f'Pre-delete snapshot failed for sandbox {sandbox_id} '
+                    '(continuing with delete)',
+                    exc_info=True,
                 )
 
             container = self.docker_client.containers.get(sandbox_id)
