@@ -16,6 +16,7 @@ class ExecutionState(str, Enum):
     COMPLETED = 'COMPLETED'
     FAILED = 'FAILED'
     CANCELLED = 'CANCELLED'
+    ARCHIVED = 'ARCHIVED'
 
 
 class SourceType(str, Enum):
@@ -33,9 +34,10 @@ VALID_TRANSITIONS: dict[ExecutionState, set[ExecutionState]] = {
         ExecutionState.FAILED,
         ExecutionState.CANCELLED,
     },
-    ExecutionState.COMPLETED: set(),
-    ExecutionState.FAILED: set(),
+    ExecutionState.COMPLETED: {ExecutionState.ARCHIVED},
+    ExecutionState.FAILED: {ExecutionState.ARCHIVED},
     ExecutionState.CANCELLED: set(),
+    ExecutionState.ARCHIVED: set(),
 }
 
 
@@ -56,6 +58,7 @@ class ExecutionRecord:
     max_budget: float | None = None
     conversation_id: str | None = None
     error_message: str | None = None
+    archive_location: str | None = None
     started_at: datetime | None = None
     completed_at: datetime | None = None
     created_at: datetime | None = None

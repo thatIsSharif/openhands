@@ -200,13 +200,25 @@ async def _handle_comment_created(
         f'{issue_key} (sandbox: {sandbox_id})'
     )
 
-    # Resume the sandbox if needed
+    # Resume / restore the sandbox if needed
     async with get_sandbox_service(request.state, request) as sandbox_service:
         sandbox = await sandbox_service.get_sandbox(sandbox_id)
-        if sandbox is None:
+        if sandbox is None or sandbox.status == SandboxStatus.MISSING:
+            logger.info(
+                f'[Automation] Sandbox {sandbox_id} not available for '
+                f'{issue_key}, attempting archive restore'
+            )
+            restored = await _restore_archived_conversation(
+                issue_key=issue_key,
+                conversation_id=conversation_id,
+                payload=payload,
+                request=request,
+            )
+            if restored:
+                return True
             logger.warning(
-                f'[Automation] Sandbox {sandbox_id} for conversation '
-                f'{conversation_id} not found, creating new conversation'
+                f'[Automation] Archive restore failed for {issue_key}, '
+                'creating new conversation'
             )
             store = ExecutionStore()
             execution_service = ExecutionService(store=store)
@@ -225,7 +237,7 @@ async def _handle_comment_created(
 
             logger.info(
                 f'[Automation] New conversation created for {issue_key} '
-                f'via @openhands comment (sandbox missing): '
+                f'via @openhands comment (restore failed): '
                 f'{result.get("status")} '
                 f'(execution: {result.get("execution_id", "N/A")})'
             )
@@ -615,4 +627,168 @@ async def post_jira_token_usage(
                 traceback.format_exc(),
             )
 
-    return {'status': 'ok', 'comment_id': result.get('id', '')}
+async def _restore_archived_conversation(
+    *,
+    issue_key: str,
+    conversation_id: str,
+    payload: dict,
+    request: Request,
+) -> bool:
+    """Restore an archived conversation from S3 into a fresh sandbox.
+
+    Returns True if the restore succeeded and the conversation resumed,
+    False if anything failed (caller should fall back to new conversation).
+    """
+    try:
+        from openhands.agent_server.models import SendMessageRequest, TextContent
+        from openhands.app_server.automation.input_sanitizer import (
+            has_dangerous_patterns,
+        )
+        from openhands.app_server.automation.prompt_renderer import render_prompt
+        from openhands.app_server.automation.sandbox_archive_service import (
+            SandboxArchiveService,
+        )
+        from openhands.app_server.config import (
+            get_app_conversation_info_service,
+            get_httpx_client,
+            get_sandbox_service,
+        )
+        from openhands.app_server.file_store.s3 import S3FileStore
+        from openhands.app_server.sandbox.sandbox_models import (
+            AGENT_SERVER,
+        )
+        from openhands.app_server.utils.docker_utils import (
+            replace_localhost_hostname_for_docker,
+        )
+
+        store = ExecutionStore()
+        archived = await store.get_latest_archived_execution(
+            jira_issue_key=issue_key,
+        )
+        if not archived or not archived.archive_location:
+            logger.info(
+                f'[Automation] No archived execution found for {issue_key}'
+            )
+            return False
+
+        logger.info(
+            f'[Automation] Found archived execution {archived.execution_id} '
+            f'for {issue_key} at {archived.archive_location}'
+        )
+
+        # Get conversation metadata for repo info
+        async with get_app_conversation_info_service(
+            request.state, request
+        ) as info_service:
+            conv_info = await info_service.get_app_conversation_info(
+                conversation_id
+            )
+
+        repo = conv_info.selected_repository if conv_info else None
+        branch = conv_info.selected_branch if conv_info else 'main'
+
+        # Create a fresh sandbox
+        async with (
+            get_sandbox_service(request.state, request) as sandbox_service,
+            get_httpx_client(request.state, request) as httpx_client,
+        ):
+            sandbox = await sandbox_service.start_sandbox()
+            await sandbox_service.wait_for_sandbox_running(
+                sandbox.id, timeout=120, poll_interval=2,
+            )
+
+            # Resolve agent server URL
+            agent_url = None
+            for eu in sandbox.exposed_urls or []:
+                if eu.name == AGENT_SERVER:
+                    agent_url = eu.url
+                    break
+            if not agent_url:
+                return False
+            agent_url = replace_localhost_hostname_for_docker(agent_url)
+
+            # Restore conversation archive
+            s3_store = S3FileStore()
+            archive_svc = SandboxArchiveService(
+                s3_store=s3_store,
+                httpx_client=httpx_client,
+            )
+            ok = await archive_svc.restore_into_sandbox(
+                agent_server_url=agent_url,
+                session_api_key=sandbox.session_api_key,
+                s3_key=archived.archive_location,
+                conversation_id=conversation_id,
+            )
+            if not ok:
+                # Cleanup
+                await sandbox_service.delete_sandbox(sandbox.id)
+                return False
+
+            # Start the conversation (resume path activates automatically)
+            start_req = {
+                'conversation_id': conversation_id,
+                'workspace': {'working_dir': '/workspace/project'},
+                'max_iterations': archived.max_iterations or 500,
+            }
+            resp = await httpx_client.post(
+                f'{agent_url}/api/conversations',
+                json=start_req,
+                headers={'X-Session-API-Key': sandbox.session_api_key},
+                timeout=120.0,
+            )
+            resp.raise_for_status()
+
+            # Forward the new comment message
+            comment = payload.get('comment', {})
+            comment_body = (comment.get('body', '') or '').strip()
+            user = comment.get('author', {}).get('displayName', 'User')
+
+            # Sanitize
+            is_dangerous, labels = has_dangerous_patterns(
+                comment_body, field_name='jira_existing_comment'
+            )
+            if is_dangerous:
+                logger.warning(
+                    '[Security] Rejecting dangerous comment on %s: %s',
+                    issue_key, labels,
+                )
+                return False
+
+            message_text = render_prompt(
+                'jira_existing_conversation.j2',
+                user=user,
+                comment=comment_body,
+                issue_key=issue_key,
+            )
+            await httpx_client.post(
+                f'{agent_url}/api/conversations/{conversation_id}/events',
+                json={
+                    'role': 'user',
+                    'content': [{'type': 'text', 'text': message_text}],
+                    'run': True,
+                },
+                headers={
+                    'X-Session-API-Key': sandbox.session_api_key,
+                },
+                timeout=60.0,
+            )
+
+            # Link the new sandbox to the conversation
+            if conv_info:
+                conv_info = conv_info.model_copy(
+                    update={'sandbox_id': sandbox.id}
+                )
+                await info_service.save_app_conversation_info(conv_info)
+
+            logger.info(
+                f'[Automation] Restored and resumed conversation '
+                f'{conversation_id} from archive {archived.archive_location}'
+            )
+            return True
+
+    except Exception:
+        logger.error(
+            f'[Automation] Archive restore failed for {issue_key}: '
+            f'{__import__("traceback").format_exc()}',
+        )
+        return False

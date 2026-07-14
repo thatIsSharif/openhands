@@ -1,7 +1,8 @@
 """Callback processors for execution lifecycle events.
 
-Handles post-execution state updates when conversations complete or fail.
-Hooks into the EventCallbackProcessor system to react to terminal states.
+Handles post-execution state transitions: when a conversation reaches a
+terminal state the processor archives the conversation + workspace to S3
+and destroys the sandbox instead of leaving it paused.
 """
 
 from __future__ import annotations
@@ -27,20 +28,22 @@ from openhands.sdk.event.conversation_state import ConversationStateUpdateEvent
 from .correlation import build_log_context
 from .execution_models import ExecutionState
 from .execution_store import ExecutionStore
+from .sandbox_archive_service import SandboxArchiveService
 
 if TYPE_CHECKING:
     from fastapi import Request
 
 
 class AutomationEventCallbackProcessor(EventCallbackProcessor):
-    """Event callback processor that updates automation executions.
+    """Event callback processor that archives automation executions.
 
     Registered on automation-triggered conversations. Listens for
     ConversationStateUpdateEvent with terminal execution_status values
-    (FINISHED, ERROR, STUCK) and updates the execution record.
+    (FINISHED, ERROR, STUCK), marks the execution COMPLETED/FAILED,
+    archives conversation state to S3, and destroys the sandbox.
 
     When state and request are injected via set_request_context(),
-    the processor will also automatically pause the sandbox after
+    the processor will also automatically archive and cleanup after
     the execution state transition.
     """
 
@@ -50,7 +53,7 @@ class AutomationEventCallbackProcessor(EventCallbackProcessor):
     _request: 'Request | None' = None
 
     def set_request_context(self, state: object, request: 'Request') -> None:
-        """Store the request context for sandbox pause on terminal state."""
+        """Store the request context for archive + cleanup on terminal state."""
         self._state = state
         self._request = request
 
@@ -74,7 +77,6 @@ class AutomationEventCallbackProcessor(EventCallbackProcessor):
         if not exec_status.is_terminal():
             return None
 
-        # Look up the execution record via the conversation_id
         store = ExecutionStore()
         record = await store.get_execution_by_conversation_id(
             str(conversation_id)
@@ -86,7 +88,6 @@ class AutomationEventCallbackProcessor(EventCallbackProcessor):
             )
             return None
 
-        # Determine execution state from conversation status
         if exec_status == ConversationExecutionStatus.FINISHED:
             new_state = ExecutionState.COMPLETED
         else:
@@ -107,11 +108,12 @@ class AutomationEventCallbackProcessor(EventCallbackProcessor):
             ),
         )
 
-        # Pause the sandbox if request context is available
+        # Archive to S3 and destroy sandbox
         if self._state is not None and self._request is not None:
-            await self._pause_sandbox(conversation_id)
+            await self._archive_and_delete_sandbox(
+                conversation_id, record.execution_id,
+            )
 
-        # Disable this callback after terminal event
         callback.status = EventCallbackStatus.COMPLETED
 
         return EventCallbackResult(
@@ -121,31 +123,96 @@ class AutomationEventCallbackProcessor(EventCallbackProcessor):
             conversation_id=conversation_id,
         )
 
-    async def _pause_sandbox(self, conversation_id: UUID) -> None:
-        """Pause the sandbox associated with this conversation."""
+    async def _archive_and_delete_sandbox(
+        self, conversation_id: UUID, execution_id: str,
+    ) -> None:
+        """Archive conversation state to S3 then destroy the sandbox."""
         try:
             from openhands.app_server.config import (
                 get_app_conversation_info_service,
+                get_httpx_client,
+                get_sandbox_service,
             )
-            from openhands.app_server.utils.sandbox_utils import (
-                pause_sandbox,
+            from openhands.app_server.file_store.s3 import S3FileStore
+            from openhands.app_server.sandbox.sandbox_models import (
+                AGENT_SERVER,
+            )
+            from openhands.app_server.utils.docker_utils import (
+                replace_localhost_hostname_for_docker,
             )
 
-            async with get_app_conversation_info_service(
-                self._state, self._request
-            ) as info_service:
+            async with (
+                get_app_conversation_info_service(
+                    self._state, self._request
+                ) as info_service,
+                get_sandbox_service(
+                    self._state, self._request
+                ) as sandbox_service,
+                get_httpx_client(
+                    self._state, self._request
+                ) as httpx_client,
+            ):
                 info = await info_service.get_app_conversation_info(
                     conversation_id
                 )
-                if info and info.sandbox_id:
-                    await pause_sandbox(
-                        info.sandbox_id, self._state, self._request
+                if not info or not info.sandbox_id:
+                    return
+
+                sandbox = await sandbox_service.get_sandbox(info.sandbox_id)
+                if not sandbox:
+                    return
+
+                # Resolve agent server URL
+                agent_url = None
+                for eu in sandbox.exposed_urls or []:
+                    if eu.name == AGENT_SERVER:
+                        agent_url = eu.url
+                        break
+                if not agent_url:
+                    return
+                agent_url = replace_localhost_hostname_for_docker(agent_url)
+
+                # Build mapping key
+                store = ExecutionStore()
+                record = await store.get_execution(execution_id)
+                if not record:
+                    return
+                mapping_key = SandboxArchiveService.build_mapping_key(
+                    jira_issue_key=record.jira_issue_key,
+                    owner=info.selected_repository.split('/')[0]
+                    if info.selected_repository and '/' in info.selected_repository
+                    else None,
+                    repo=info.selected_repository.split('/')[1]
+                    if info.selected_repository and '/' in info.selected_repository
+                    else info.selected_repository,
+                    pr_number=info.pr_number[0] if info.pr_number else None,
+                )
+
+                s3_store = S3FileStore()
+
+                archive_svc = SandboxArchiveService(
+                    s3_store=s3_store,
+                    httpx_client=httpx_client,
+                )
+                s3_key = await archive_svc.archive_and_cleanup(
+                    agent_server_url=agent_url,
+                    session_api_key=sandbox.session_api_key,
+                    sandbox_id=info.sandbox_id,
+                    conversation_id=str(conversation_id),
+                    execution_id=execution_id,
+                    mapping_key=mapping_key,
+                    sandbox_service=sandbox_service,
+                )
+                if s3_key:
+                    await store.set_archive_location(execution_id, s3_key)
+                    logger.info(
+                        '[Automation] Archived execution %s to %s',
+                        execution_id, s3_key,
                     )
         except Exception:
             logger.error(
-                '[Automation] Failed to pause sandbox for conversation '
-                f'{conversation_id}:',
-                exc_info=True,
+                '[Automation] Failed to archive sandbox for conversation '
+                f'{conversation_id}:', exc_info=True,
             )
 
 

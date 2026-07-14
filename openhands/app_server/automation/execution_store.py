@@ -572,6 +572,56 @@ class ExecutionStore:
 
     # --- Private helpers ---
 
+    async def set_archive_location(
+        self, execution_id: str, s3_key: str
+    ) -> ExecutionRecord | None:
+        """Record the S3 key where the execution was archived."""
+        async with self._get_session() as session:
+            result = await session.execute(
+                select(StoredExecution).filter(
+                    StoredExecution.execution_id == execution_id
+                )
+            )
+            execution = result.scalars().first()
+            if not execution:
+                return None
+            execution.archive_location = s3_key
+            execution.state = ExecutionState.ARCHIVED.value
+            execution.updated_at = datetime.now(timezone.utc)
+            await session.commit()
+            await session.refresh(execution)
+            return self._record_from_model(execution)
+
+    async def get_latest_archived_execution(
+        self,
+        jira_issue_key: str | None = None,
+        github_pr_id: int | None = None,
+        repository: str | None = None,
+    ) -> ExecutionRecord | None:
+        """Find the most recently archived execution for a given issue or PR."""
+        async with self._get_session() as session:
+            query = select(StoredExecution).filter(
+                StoredExecution.state == ExecutionState.ARCHIVED.value,
+                StoredExecution.archive_location.isnot(None),
+            )
+            if jira_issue_key:
+                query = query.filter(
+                    StoredExecution.jira_issue_key == jira_issue_key
+                )
+            if github_pr_id is not None:
+                query = query.filter(
+                    StoredExecution.github_pr_id == github_pr_id
+                )
+            if repository:
+                query = query.filter(
+                    StoredExecution.repository == repository
+                )
+            query = query.order_by(StoredExecution.completed_at.desc())
+            query = query.limit(1)
+            result = await session.execute(query)
+            execution = result.scalars().first()
+            return self._record_from_model(execution) if execution else None
+
     @staticmethod
     def _record_from_model(
         execution: StoredExecution,
@@ -590,6 +640,7 @@ class ExecutionStore:
             max_budget=execution.max_budget,
             conversation_id=execution.conversation_id,
             error_message=execution.error_message,
+            archive_location=execution.archive_location,
             started_at=execution.started_at,
             completed_at=execution.completed_at,
             created_at=execution.created_at,

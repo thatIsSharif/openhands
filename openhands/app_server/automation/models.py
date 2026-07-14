@@ -38,6 +38,7 @@ class StoredExecution(Base):
         String(255), nullable=True, index=True
     )
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    archive_location: Mapped[str | None] = mapped_column(Text, nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(

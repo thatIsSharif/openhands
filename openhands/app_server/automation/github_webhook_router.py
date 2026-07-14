@@ -55,6 +55,7 @@ from openhands.app_server.utils.logger import openhands_logger as logger
 from openhands.app_server.utils.sandbox_utils import pause_sandbox
 
 from .input_sanitizer import build_rejection_message
+from .sandbox_archive_service import SandboxArchiveService
 
 
 def _get_agent_url_from_sandbox(sandbox) -> str | None:
@@ -360,11 +361,23 @@ async def _process_github_review_submitted(
             sandbox = await sandbox_service.get_sandbox(sandbox_id)
 
         elif sandbox.status == SandboxStatus.MISSING:
-            logger.warning(
+            logger.info(
                 f'[Automation] Sandbox {sandbox_id} for PR #{pr_number} '
-                'is missing, cannot resume'
+                'is missing, attempting archive restore'
             )
-            return
+            new_sandbox_id = await _restore_archived_pr_conversation(
+                pr_number=pr_number,
+                repository=full_name,
+                conversation_id=conversation_id,
+                payload=payload,
+                request=request,
+            )
+            if not new_sandbox_id:
+                logger.warning(
+                    f'[Automation] Archive restore failed for PR #{pr_number}'
+                )
+                return
+            sandbox_id = new_sandbox_id
 
     # Send the review as a message to the existing conversation
     async with get_httpx_client(request.state, request) as httpx_client:
@@ -537,4 +550,123 @@ async def post_github_pr_comment(
             traceback.format_exc(),
         )
 
-    return {'status': 'ok', 'comment_id': comment_id}
+async def _restore_archived_pr_conversation(
+    *,
+    pr_number: int,
+    repository: str,
+    conversation_id: str,
+    payload: dict,
+    request: Request,
+) -> str | None:
+    """Restore an archived PR conversation from S3 into a fresh sandbox.
+
+    Returns the new sandbox_id on success, None on failure.
+    """
+    try:
+        from openhands.app_server.automation.prompt_renderer import render_prompt
+        from openhands.app_server.config import (
+            get_app_conversation_info_service,
+            get_httpx_client,
+            get_sandbox_service,
+        )
+        from openhands.app_server.file_store.s3 import S3FileStore
+        from openhands.app_server.sandbox.sandbox_models import (
+            AGENT_SERVER,
+        )
+        from openhands.app_server.utils.docker_utils import (
+            replace_localhost_hostname_for_docker,
+        )
+
+        store = ExecutionStore()
+        archived = await store.get_latest_archived_execution(
+            github_pr_id=pr_number,
+            repository=repository,
+        )
+        if not archived or not archived.archive_location:
+            logger.info(
+                f'[Automation] No archived execution for PR #{pr_number} '
+                f'in {repository}'
+            )
+            return None
+
+        logger.info(
+            f'[Automation] Found archived execution {archived.execution_id} '
+            f'for PR #{pr_number} at {archived.archive_location}'
+        )
+
+        async with (
+            get_app_conversation_info_service(
+                request.state, request
+            ) as info_service,
+            get_sandbox_service(request.state, request) as sandbox_service,
+            get_httpx_client(request.state, request) as httpx_client,
+        ):
+            conv_info = await info_service.get_app_conversation_info(
+                conversation_id
+            )
+
+            # Create fresh sandbox
+            sandbox = await sandbox_service.start_sandbox()
+            await sandbox_service.wait_for_sandbox_running(
+                sandbox.id, timeout=120, poll_interval=2,
+            )
+
+            # Resolve agent server URL
+            agent_url = None
+            for eu in sandbox.exposed_urls or []:
+                if eu.name == AGENT_SERVER:
+                    agent_url = eu.url
+                    break
+            if not agent_url:
+                await sandbox_service.delete_sandbox(sandbox.id)
+                return None
+            agent_url = replace_localhost_hostname_for_docker(agent_url)
+
+            # Restore conversation archive
+            s3_store = S3FileStore()
+            archive_svc = SandboxArchiveService(
+                s3_store=s3_store,
+                httpx_client=httpx_client,
+            )
+            ok = await archive_svc.restore_into_sandbox(
+                agent_server_url=agent_url,
+                session_api_key=sandbox.session_api_key,
+                s3_key=archived.archive_location,
+                conversation_id=conversation_id,
+            )
+            if not ok:
+                await sandbox_service.delete_sandbox(sandbox.id)
+                return None
+
+            # Start conversation (resume path)
+            resp = await httpx_client.post(
+                f'{agent_url}/api/conversations',
+                json={
+                    'conversation_id': conversation_id,
+                    'workspace': {'working_dir': '/workspace/project'},
+                    'max_iterations': archived.max_iterations or 500,
+                },
+                headers={'X-Session-API-Key': sandbox.session_api_key},
+                timeout=120.0,
+            )
+            resp.raise_for_status()
+
+            # Link new sandbox to conversation
+            if conv_info:
+                conv_info = conv_info.model_copy(
+                    update={'sandbox_id': sandbox.id}
+                )
+                await info_service.save_app_conversation_info(conv_info)
+
+            logger.info(
+                f'[Automation] Restored conversation {conversation_id} '
+                f'for PR #{pr_number} from archive {archived.archive_location}'
+            )
+            return sandbox.id
+
+    except Exception:
+        logger.error(
+            f'[Automation] Archive restore failed for PR #{pr_number}: '
+            f'{__import__("traceback").format_exc()}',
+        )
+        return None
