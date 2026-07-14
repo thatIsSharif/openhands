@@ -114,7 +114,7 @@ class WorkspaceExportService:
         try:
             image = self._docker.images.get(snapshot_tag)
             tar_stream: io.BytesIO = io.BytesIO()
-            for chunk in image.save(nk=self._max_image_size_mb):
+            for chunk in image.save(chunk_size=self._max_image_size_mb * 1024 * 1024):
                 tar_stream.write(chunk)
             image_tar = tar_stream.getvalue()
         except Exception as exc:
