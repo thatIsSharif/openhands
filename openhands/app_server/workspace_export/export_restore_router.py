@@ -27,14 +27,20 @@ _logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix='/api/v1', tags=['Workspace Export'])
 
+# FastAPI dependency instances: called at module level so the decorator
+# sees Depends() instances as default values, not raw function objects.
+_app_conversation_service_dep = depends_app_conversation_service()
+_app_conversation_info_service_dep = depends_app_conversation_info_service()
+_sandbox_service_dep = depends_sandbox_service()
+
 
 @router.post('/workspace-exports/{conversation_id}')
 async def export_conversation(
     conversation_id: UUID,
     request: Request,
-    app_conversation_service: AppConversationService = depends_app_conversation_service,
-    app_conversation_info_service: AppConversationInfoService = depends_app_conversation_info_service,
-    sandbox_service: SandboxService = depends_sandbox_service,
+    app_conversation_service: AppConversationService = _app_conversation_service_dep,
+    app_conversation_info_service: AppConversationInfoService = _app_conversation_info_service_dep,
+    sandbox_service: SandboxService = _sandbox_service_dep,
 ) -> dict:
     """Manually trigger a workspace export for a conversation."""
     state = InjectorState()
@@ -82,7 +88,7 @@ async def restore_conversation(
     jira_key: str,
     new_sandbox_id: str | None = None,
     request: Request | None = None,
-    sandbox_service: SandboxService = depends_sandbox_service,
+    sandbox_service: SandboxService = _sandbox_service_dep,
 ) -> dict:
     """Restore a workspace from a previously exported snapshot."""
     state = InjectorState()
@@ -115,8 +121,6 @@ async def check_export(
     request: Request | None = None,
 ) -> dict:
     """Check if an export exists for a given Jira key."""
-    from openhands.app_server.workspace_export.local_storage import LocalStorage
-
     state = InjectorState()
     async with get_workspace_export_service(state, request) as export_service:
         exists = await export_service._storage.exists(jira_key)
@@ -129,8 +133,6 @@ async def delete_export(
     request: Request | None = None,
 ) -> dict:
     """Delete a stored export for a given Jira key."""
-    from openhands.app_server.workspace_export.local_storage import LocalStorage
-
     state = InjectorState()
     async with get_workspace_export_service(state, request) as export_service:
         deleted = await export_service._storage.delete(jira_key)
