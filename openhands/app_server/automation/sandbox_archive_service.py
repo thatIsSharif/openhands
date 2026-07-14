@@ -10,6 +10,7 @@ path.
 
 from __future__ import annotations
 
+import base64
 import io
 import os
 import tarfile
@@ -101,9 +102,9 @@ class SandboxArchiveService:
 
             archive_data = buf.getvalue()
 
-            # 3. Upload to S3
+            # 3. Upload to S3 (base64-encode: S3FileStore.read returns str)
             s3_key = f'archives/{mapping_key}/{execution_id}.tar.gz'
-            self._s3.write(s3_key, archive_data)
+            self._s3.write(s3_key, base64.b64encode(archive_data).decode('ascii'))
             logger.info(
                 '[SandboxArchive] Uploaded %d bytes to s3://%s/%s',
                 len(archive_data), self._s3._get_bucket_name(), s3_key,
@@ -143,9 +144,8 @@ class SandboxArchiveService:
         will automatically take the resume path.
         """
         try:
-            archive_data = self._s3.read(s3_key)
-            if isinstance(archive_data, str):
-                archive_data = archive_data.encode('utf-8')
+            archive_b64 = self._s3.read(s3_key)
+            archive_data = base64.b64decode(archive_b64)
         except Exception:
             logger.error(
                 '[SandboxArchive] Failed to read s3://%s/%s',
