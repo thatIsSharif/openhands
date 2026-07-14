@@ -15,7 +15,6 @@ Supports:
 
 from __future__ import annotations
 
-import json
 import os
 import re
 import traceback
@@ -34,8 +33,8 @@ from openhands.app_server.automation.execution_service import (
 )
 from openhands.app_server.automation.execution_store import ExecutionStore
 from openhands.app_server.automation.input_sanitizer import (
+    build_rejection_message,
     has_dangerous_patterns,
-    build_rejection_message
 )
 from openhands.app_server.automation.jira_automation_service import (
     JiraAutomationService,
@@ -47,7 +46,6 @@ from openhands.app_server.automation.openhands_client import (
 from openhands.app_server.automation.prompt_renderer import render_prompt
 from openhands.app_server.config import (
     get_app_conversation_info_service,
-    get_app_conversation_service,
     get_httpx_client,
     get_sandbox_service,
 )
@@ -212,10 +210,10 @@ async def _try_restore_from_snapshot(
                 )
                 return None
             logger.info(
-                f'[Automation] Restored sandbox {new_sandbox_id} '
+                f'[Automation] Restored sandbox {sandbox_info.id} '
                 f'from image {loaded_tag} for {issue_key}'
             )
-            return new_sandbox_id
+            return sandbox_info.id
     except Exception as exc:
         logger.exception(
             f'[Automation] Sandbox restore failed for {issue_key}: {exc}'
