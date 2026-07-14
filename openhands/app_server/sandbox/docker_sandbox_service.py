@@ -585,11 +585,6 @@ class DockerSandboxService(SandboxService):
 
             container.commit(
                 repository=snapshot_name,
-                labels={
-                    'sandbox_id': sandbox_id,
-                    'snapshot_name': snapshot_name,
-                    'created_at': str(timestamp),
-                },
             )
 
             _logger.info(
@@ -733,11 +728,17 @@ class DockerSandboxService(SandboxService):
                 return False
 
             # Snapshot before destroy for disaster recovery
-            snapshot_name = await self.snapshot_sandbox(sandbox_id)
-            if snapshot_name:
-                _logger.info(
-                    f'Created pre-delete snapshot {snapshot_name} '
-                    f'for sandbox {sandbox_id}'
+            try:
+                snapshot_name = await self.snapshot_sandbox(sandbox_id)
+                if snapshot_name:
+                    _logger.info(
+                        f'Created pre-delete snapshot {snapshot_name} '
+                        f'for sandbox {sandbox_id}'
+                    )
+            except Exception:
+                _logger.warning(
+                    f'Failed to snapshot sandbox {sandbox_id} before delete, '
+                    'continuing with destroy', exc_info=True,
                 )
 
             container = self.docker_client.containers.get(sandbox_id)
