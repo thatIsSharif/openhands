@@ -184,18 +184,20 @@ class SandboxArchiveService:
 
                 # Extract into conversations dir
                 dest = f'/home/openhands/{conversations_path}/{conversation_id}'
+                # Use python3 zipfile (unzip is not in the sandbox image)
+                extract_cmd = (
+                    'python3 -c "'
+                    f"import zipfile, pathlib;"
+                    f"d=pathlib.Path('{dest}');"
+                    f"d.mkdir(parents=True, exist_ok=True);"
+                    f"zipfile.ZipFile('/tmp/_restore.zip').extractall(d);"
+                    f"for f in ['owner_lease.json','lease.lock','.eventlog.lock']:"
+                    f" (d/f).unlink(missing_ok=True);"
+                    f"pathlib.Path('/tmp/_restore.zip').unlink(missing_ok=True)\""
+                )
                 bash_resp = await self._httpx.post(
-                    f'{agent_server_url}/api/bash',
-                    json={
-                        'command': (
-                            f'mkdir -p {dest} && '
-                            f'unzip -o /tmp/_restore.zip -d {dest} && '
-                            f'rm -f {dest}/owner_lease.json {dest}/lease.lock '
-                            f'{dest}/.eventlog.lock && '
-                            f'rm /tmp/_restore.zip'
-                        ),
-                        'run': True,
-                    },
+                    f'{agent_server_url}/api/bash/execute_bash_command',
+                    json={'command': extract_cmd},
                     headers=headers,
                     timeout=30.0,
                 )
@@ -243,8 +245,8 @@ class SandboxArchiveService:
         headers = {'X-Session-API-Key': session_api_key}
         try:
             resp = await httpx_client.post(
-                f'{agent_server_url}/api/bash',
-                json={'command': cmd, 'run': True},
+                f'{agent_server_url}/api/bash/execute_bash_command',
+                json={'command': cmd},
                 headers=headers,
                 timeout=300.0,
             )

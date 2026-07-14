@@ -697,7 +697,7 @@ async def _restore_archived_pr_conversation(
 
     except Exception:
         logger.error(
-            f'[Automation] Archive restore failed for PR #{pr_number}: '
-            f'{__import__("traceback").format_exc()}',
+            f'[Automation] Archive restore failed for PR #{pr_number}',
+            exc_info=True,
         )
         return None

@@ -867,7 +867,7 @@ async def _restore_archived_conversation(
 
     except Exception:
         logger.error(
-            f'[Automation] Archive restore failed for {issue_key}: '
-            f'{__import__("traceback").format_exc()}',
+            f'[Automation] Archive restore failed for {issue_key}',
+            exc_info=True,
         )
         return False
