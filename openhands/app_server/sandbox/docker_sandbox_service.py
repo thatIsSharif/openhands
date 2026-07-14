@@ -727,20 +727,6 @@ class DockerSandboxService(SandboxService):
             if not sandbox_id.startswith(self.container_name_prefix):
                 return False
 
-            # Snapshot before destroy for disaster recovery
-            try:
-                snapshot_name = await self.snapshot_sandbox(sandbox_id)
-                if snapshot_name:
-                    _logger.info(
-                        f'Created pre-delete snapshot {snapshot_name} '
-                        f'for sandbox {sandbox_id}'
-                    )
-            except Exception:
-                _logger.warning(
-                    f'Failed to snapshot sandbox {sandbox_id} before delete, '
-                    'continuing with destroy', exc_info=True,
-                )
-
             container = self.docker_client.containers.get(sandbox_id)
 
             # Stop the container if it's running
