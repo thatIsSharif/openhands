@@ -954,6 +954,43 @@ async def delete_app_conversation(
     # Commit the deletion
     await db_session.commit()
 
+    # If the conversation has a jira_issue_key, trigger a workspace export
+    # BEFORE the sandbox is deleted.  This handles the case where the
+    # conversation never reached a terminal execution state (common in
+    # local development) – the user's manual delete serves as the trigger.
+    jira_key = app_conversation_info.jira_issue_key
+    if jira_key and sandbox_id:
+        try:
+            from openhands.app_server.config import get_workspace_export_service
+            from openhands.app_server.services.injector import InjectorState
+
+            state = InjectorState()
+            async with get_workspace_export_service(state, request) as export_service:
+                export_result = await export_service.export_conversation(
+                    conversation_id=conversation_uuid,
+                    jira_key=jira_key,
+                    app_conversation_service=app_conversation_service,
+                    app_conversation_info_service=app_conversation_info_service,
+                    docker_sandbox_service=sandbox_service,
+                )
+                if export_result.success:
+                    logger.info(
+                        'Workspace export on delete succeeded for %s (tag: %s)',
+                        jira_key,
+                        export_result.snapshot_tag,
+                    )
+                else:
+                    logger.warning(
+                        'Workspace export on delete failed for %s: %s',
+                        jira_key,
+                        export_result.error_message,
+                    )
+        except Exception:
+            logger.exception(
+                'Workspace export on delete raised for %s',
+                jira_key,
+            )
+
     # Keep connections open for background task
     set_db_session_keep_open(request.state, True)
     set_httpx_client_keep_open(request.state, True)
