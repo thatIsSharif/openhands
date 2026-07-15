@@ -23,11 +23,6 @@ class GitHubMixinBase(BaseGitService, HTTPClient):
     BASE_URL: str
     GRAPHQL_URL: str
 
-    # Optional repository context for GitHub App token resolution.
-    # When set, _get_headers prefers a GitHub App installation token
-    # over the user PAT.
-    selected_repository: str | None = None
-
     @staticmethod
     def _resolve_primary_email(emails: list[dict]) -> str | None:
         """Find the primary verified email from a list of GitHub email objects.
@@ -42,21 +37,7 @@ class GitHubMixinBase(BaseGitService, HTTPClient):
         return None
 
     async def _get_headers(self) -> dict:
-        """Retrieve the GH Token from settings store to construct the headers.
-
-        Prefers a GitHub App installation token when the GitHub App is
-        configured and ``selected_repository`` is set. Falls back to the
-        user PAT (``self.token``).
-        """
-        # Try GitHub App token first (auto-refreshing, no staleness worries)
-        gh_app_token = await self._resolve_github_app_token()
-        if gh_app_token:
-            return {
-                'Authorization': f'Bearer {gh_app_token}',
-                'Accept': 'application/vnd.github.v3+json',
-            }
-
-        # Fall back to the user PAT
+        """Retrieve the GH Token from settings store to construct the headers."""
         if not self.token:
             latest_token = await self.get_latest_token()
             if latest_token:
@@ -66,37 +47,6 @@ class GitHubMixinBase(BaseGitService, HTTPClient):
             'Authorization': f'Bearer {self.token.get_secret_value() if self.token else ""}',
             'Accept': 'application/vnd.github.v3+json',
         }
-
-    async def _resolve_github_app_token(self) -> str | None:
-        """Try to resolve a GitHub App installation token.
-
-        Uses ``selected_repository`` if set, otherwise falls back to the
-        default installation ID from the environment.
-
-        Returns None if GitHub App is not configured.
-        """
-        from openhands.app_server.utils.github_app import (
-            GitHubAppTokenManager,
-        )
-
-        if not GitHubAppTokenManager.is_available():
-            return None
-
-        try:
-            if self.selected_repository:
-                owner, _, repo = self.selected_repository.partition('/')
-                return GitHubAppTokenManager.get_token_for_repository(
-                    owner, repo
-                )
-
-            return GitHubAppTokenManager.get_token_for_installation()
-        except Exception:
-            import logging as _logging
-
-            _logging.getLogger(__name__).exception(
-                'Failed to resolve GitHub App token, falling back to PAT'
-            )
-            return None
 
     async def get_latest_token(self) -> SecretStr | None:  # type: ignore[override]
         return self.token
