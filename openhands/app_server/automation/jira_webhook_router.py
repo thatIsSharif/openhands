@@ -919,11 +919,15 @@ async def _restore_archived_conversation(
                 )
                 return False
 
+            # Build the token-usage endpoint from the request
+            base_url = str(request.base_url).rstrip('/')
+            token_usage_url = f'{base_url}/api/v1/jira/start/token-usage'
+
             message_text = render_prompt(
                 'jira_existing_conversation.j2',
-                user=user,
-                comment=comment_body,
                 issue_key=issue_key,
+                comment_body=comment_body,
+                token_usage_url=token_usage_url,
             )
             await httpx_client.post(
                 f'{agent_url}/api/conversations/{conversation_id}/events',
