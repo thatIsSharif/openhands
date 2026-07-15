@@ -682,7 +682,7 @@ async def _restore_archived_pr_conversation(
             agent_settings = settings_resp.json()['agent_settings']
 
             start_req: dict[str, object] = {
-                'conversation_id': conversation_id,
+                'conversation_id': str(conversation_id),
                 'workspace': {'working_dir': '/workspace/project'},
                 'max_iterations': archived.max_iterations or 500,
                 'agent_settings': agent_settings,
