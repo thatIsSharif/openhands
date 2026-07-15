@@ -327,10 +327,24 @@ class SandboxArchiveService:
         (or equivalent) to be configured in the sandbox environment.
         """
         clone_url = f'https://{git_provider}/{repo_owner}/{repo_name}.git'
+        # Never delete target_dir itself — the agent-server Docker image
+        # uses WORKDIR /workspace/project as its CWD.  If we rm -rf that
+        # directory, the kernel orphans the process's CWD dentry and
+        # os.getcwd() raises FileNotFoundError, which crashes
+        # Laminar/OpenTelemetry instrumentation (find_dotenv) and causes
+        # litellm.APIConnectionError: [Errno 2] No such file or directory.
+        #
+        # Strategy: try fresh clone first.  If the directory already
+        # exists (second invocation), cd into it and update in-place via
+        # fetch + checkout + reset.  Never rm -rf the CWD.
         cmd = (
-            f'rm -rf {target_dir} && '
             f'git clone -b {branch} --single-branch '
-            f'{clone_url} {target_dir}'
+            f'{clone_url} {target_dir} 2>/dev/null || '
+            f'(cd {target_dir} && '
+            f'git fetch origin && '
+            f'git checkout -f {branch} && '
+            f'git reset --hard origin/{branch} && '
+            f'git clean -fd)'
         )
         headers = {'X-Session-API-Key': session_api_key}
         try:
