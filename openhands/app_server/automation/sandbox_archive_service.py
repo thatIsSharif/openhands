@@ -203,50 +203,12 @@ class SandboxArchiveService:
                 )
                 upload_resp.raise_for_status()
 
-                # Determine the agent server process CWD by reading
-                # /proc/<pid>/cwd.  ``pwd`` from the bash API gives the
-                # bash-session CWD, NOT the agent-server CWD, and the
-                # config.conversations_path is resolved relative to the
-                # *agent-server* CWD (``Path('workspace/conversations')``
-                # becomes ``/workspace/project/workspace/conversations``
-                # when the server runs from ``/workspace/project``).
-                #
-                # The agent-server is started via
-                # ``tini -- python /app/__main__.py``, so its cmdline
-                # contains ``/app/__main__.py`` which is unique.
-                # Iterate /proc and look for this exact marker.
-                cwd_cmd = (
-                    'python3 -c "'
-                    'import os;'
-                    "for e in sorted(os.listdir('/proc'), key=int):"
-                    '  if e.isdigit():'
-                    '    try:'
-                    "      cl = open(f'/proc/{e}/cmdline').read()"
-                    "      if '/app/__main__.py' in cl:"
-                    "        print(os.readlink(f'/proc/{e}/cwd')); break"
-                    '    except: pass'
-                    'else:'
-                    "  print('/workspace/project')"  # fallback
-                    '"'
-                )
-                cwd_resp = await self._httpx.post(
-                    f'{agent_server_url}/api/bash/execute_bash_command',
-                    json={'command': cwd_cmd},
-                    headers=headers,
-                    timeout=10.0,
-                )
-                cwd_resp.raise_for_status()
-                cwd_output = cwd_resp.json().get('stdout', '') or ''
-                agent_cwd = cwd_output.strip()
-                if not agent_cwd:
-                    logger.warning(
-                        '[SandboxArchive] Could not detect agent-server CWD, '
-                        'falling back to /'
-                    )
-                    agent_cwd = '/'
-
-                # Extract into conversations dir
-                dest = f'{agent_cwd}/{conversations_path}/{cid_hex}'
+                # Extract into conversations dir.
+                # The agent-server Docker image uses WORKDIR /workspace/project
+                # and Config.conversations_path defaults to "workspace/conversations",
+                # so the full path is fixed:
+                conversations_base = '/workspace/project/workspace/conversations'
+                dest = f'{conversations_base}/{cid_hex}'
                 # Use python3 zipfile (unzip is not in the sandbox image)
                 extract_cmd = (
                     'python3 -c "'
