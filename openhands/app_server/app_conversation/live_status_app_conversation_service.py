@@ -965,10 +965,12 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
     ) -> dict:
         """Set up secrets for all git provider authentication.
 
-        When the GitHub App is configured, the ``GITHUB_TOKEN`` secret
-        is populated with a freshly-minted installation access token
-        (via ``GitHubAppTokenManager``).  If GitHub App is not available,
-        falls back to the user's PAT.
+        For GitHub, injects a freshly-minted GitHub App installation
+        token as ``GITHUB_TOKEN``.  If GitHub App is not configured,
+        no GitHub token is injected — there is no PAT fallback.
+
+        Other providers (GitLab, Bitbucket, etc.) use the existing
+        LookupSecret or static-token patterns unchanged.
 
         Args:
             user: User information containing authentication details.
@@ -997,24 +999,22 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
             description = f'{provider_type.name} authentication token'
 
             # ── GitHub App injection ─────────────────────────────────
-            # When the GitHub App is configured, inject a fresh
-            # installation token for GITHUB_TOKEN instead of the user's
-            # PAT.  The token is cached and auto-refreshed server-side.
+            # Inject a fresh installation token for GITHUB_TOKEN.
+            # No PAT fallback — if the GitHub App is not configured,
+            # the GitHub provider is simply skipped.
             if provider_type == ProviderType.GITHUB:
                 gh_app_token = await self._resolve_github_app_token(
                     selected_repository,
                 )
                 if gh_app_token:
-                    # The agent sandbox receives the real token value
-                    # so it can use gh CLI / git push immediately.
                     secrets[secret_name] = StaticSecret(
                         value=SecretStr(gh_app_token),
                         description=description,
                     )
-                    continue
+                continue
 
+            # ── Other providers (GitLab, Bitbucket, etc.) ──────────
             if self.web_url:
-                # Create an access token for web-based authentication
                 access_token = self.jwt_service.create_jws_token(
                     payload={
                         'user_id': user.id,
@@ -1030,11 +1030,13 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
                     description=description,
                 )
             else:
-                # Use static token for environments without web URL access
-                static_token = await self.user_context.get_latest_token(provider_type)
+                static_token = await self.user_context.get_latest_token(
+                    provider_type
+                )
                 if static_token:
                     secrets[secret_name] = StaticSecret(
-                        value=SecretStr(static_token), description=description
+                        value=SecretStr(static_token),
+                        description=description,
                     )
 
         return secrets
@@ -1045,9 +1047,10 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
     ) -> str | None:
         """Resolve a GitHub App installation token, if configured.
 
-        Args:
-            selected_repository: Optional ``"owner/repo"`` for
-                installation resolution.
+        Reads ``GITHUB_APP_INSTALLATION_ID`` from the environment.
+        The ``selected_repository`` parameter is accepted for interface
+        compatibility but is not used — all repos share the same
+        installation in a single-org setup.
 
         Returns:
             A fresh installation token, or None if GitHub App is
@@ -1061,11 +1064,6 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
             return None
 
         try:
-            if selected_repository:
-                owner, _, repo = selected_repository.partition('/')
-                return GitHubAppTokenManager.get_token_for_repository(
-                    owner, repo,
-                )
             return GitHubAppTokenManager.get_token_for_installation()
         except Exception:
             _logger.exception(

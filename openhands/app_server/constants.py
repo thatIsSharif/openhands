@@ -80,7 +80,7 @@ OVERRIDABLE_SYSTEM_SECRETS: frozenset[str] = frozenset(
     {
         # Git Provider Tokens - users may provide their own credentials
         # Note: Provider tokens are fetched via app-server API, not container env
-        'GITHUB_TOKEN',
+        # GITHUB_TOKEN is intentionally excluded — it uses GitHub App exclusively.
         'GITLAB_TOKEN',
         'BITBUCKET_TOKEN',
         'AZURE_DEVOPS_TOKEN',

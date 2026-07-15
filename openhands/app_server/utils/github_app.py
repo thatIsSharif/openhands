@@ -1,22 +1,20 @@
 """GitHub App authentication manager.
 
 Uses PyGithub's GithubIntegration to mint short-lived installation access
-tokens instead of relying on long-lived personal access tokens (PATs).
+tokens. For single-org setups, ``GITHUB_APP_INSTALLATION_ID`` is set in
+the environment and all repositories share the same installation, so
+per-repo installation resolution is unnecessary.
 
 Usage:
     from openhands.app_server.utils.github_app import GitHubAppTokenManager
 
-    # Synchronous usage (e.g. utils/github.py)
-    token = GitHubAppTokenManager.get_token_for_repository("owner", "repo")
-    token = GitHubAppTokenManager.get_installation_token(123456)
+    token = GitHubAppTokenManager.get_token_for_installation()
 
-    # Check if GitHub App is configured
     if GitHubAppTokenManager.is_available():
         ...
 
-Requires env vars: GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY (or
-GITHUB_APP_PRIVATE_KEY_PATH). Optionally GITHUB_APP_INSTALLATION_ID
-for a default installation.
+Requires env vars: GITHUB_APP_ID, GITHUB_APP_PRIVATE_KEY, and
+GITHUB_APP_INSTALLATION_ID.
 """
 
 from __future__ import annotations
@@ -189,96 +187,37 @@ class GitHubAppTokenManager:
 
         return token
 
-    @classmethod
-    def get_token_for_repository(cls, owner: str, repo: str) -> str:
-        """Resolve the installation for a repository and return a token.
-
-        Args:
-            owner: Repository owner (user or org).
-            repo: Repository name.
-
-        Returns:
-            A valid installation access token string.
-
-        Raises:
-            GitHubAppNotConfiguredError: If GitHub App is not configured.
-            RuntimeError: If the installation cannot be resolved or
-                the token exchange fails.
-        """
-        integration = cls._get_integration()
-        if not integration:
-            raise GitHubAppNotConfiguredError(
-                'GitHub App not configured. '
-                'Set GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY.'
-            )
-
-        cache_key = f'repo:{owner}/{repo}'
-
-        # Check repo-level cache
-        with _cache_lock:
-            cached = _token_cache.get(cache_key)
-            if cached and cls._is_token_fresh(cached['expires_at']):
-                return cached['token']
-
-        # Resolve installation and get token
-        try:
-            installation = integration.get_repo_installation(owner, repo)
-            token = cls.get_installation_token(installation.id)
-        except Exception:
-            # Fallback: try default installation ID
-            default_id = _get_default_installation_id()
-            if default_id is not None:
-                logger.info(
-                    'Falling back to default installation %s for %s/%s',
-                    default_id, owner, repo,
-                )
-                token = cls.get_installation_token(default_id)
-            else:
-                raise
-
-        return token
-
     # ── Cache helpers ──────────────────────────────────────────────
 
     @classmethod
-    def refresh_token(cls, owner: str, repo: str) -> str:
-        """Force-refresh a cached token (used after 401/403).
+    def refresh_installation_token(
+        cls, installation_id: int | None = None
+    ) -> str:
+        """Force-refresh a cached installation token (used after 401/403).
 
-        Clears the cached entry for the given repository, then fetches
+        Clears the cached entry for the given installation, then fetches
         a fresh token.
 
         Args:
-            owner: Repository owner.
-            repo: Repository name.
+            installation_id: Installation ID. If None, uses
+                ``GITHUB_APP_INSTALLATION_ID`` from env.
 
         Returns:
             A fresh installation access token.
         """
-        cache_key = f'repo:{owner}/{repo}'
+        if installation_id is None:
+            installation_id = _get_default_installation_id()
+
+        if installation_id is None:
+            raise RuntimeError(
+                'No installation ID available. Set GITHUB_APP_INSTALLATION_ID.'
+            )
+
+        cache_key = f'inst:{installation_id}'
         with _cache_lock:
-            stale = _token_cache.pop(cache_key, None)
-            # Also clear the underlying installation-level cache entry
-            if stale:
-                for key in list(_token_cache.keys()):
-                    entry = _token_cache[key]
-                    if entry.get('token') == stale.get('token'):
-                        del _token_cache[key]
-                        break
+            _token_cache.pop(cache_key, None)
 
-        return cls.get_token_for_repository(owner, repo)
-
-    @classmethod
-    def get_cached_token(cls, owner: str, repo: str) -> str | None:
-        """Get the currently cached token without fetching (best-effort).
-
-        Returns None if no valid cached token exists.
-        """
-        cache_key = f'repo:{owner}/{repo}'
-        with _cache_lock:
-            cached = _token_cache.get(cache_key)
-            if cached and cls._is_token_fresh(cached['expires_at']):
-                return cached['token']
-        return None
+        return cls.get_installation_token(installation_id)
 
     # ── Internals ──────────────────────────────────────────────────
 
