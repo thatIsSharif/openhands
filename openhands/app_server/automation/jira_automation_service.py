@@ -17,7 +17,10 @@ import hmac
 import re
 from dataclasses import dataclass
 
-from openhands.app_server.utils.jira import add_comment
+from openhands.app_server.utils.jira import (
+    add_comment,
+    mark_issue_in_progress,
+)
 from openhands.app_server.utils.logger import openhands_logger as logger
 
 from .complexity_analyzer import ComplexityAnalyzer
@@ -26,9 +29,9 @@ from .correlation import build_log_context
 from .execution_models import ExecutionState, SourceType
 from .execution_service import ExecutionService
 from .input_sanitizer import (
+    build_rejection_message,
     has_dangerous_patterns,
     validate_jira_issue_key,
-    build_rejection_message
 )
 from .openhands_client import OpenHandsClient
 from .prompt_renderer import render_prompt
@@ -173,6 +176,72 @@ def _validate_repository_format(repository: str) -> bool:
     """Validate that a repository string is in ``owner/repository`` format."""
     parts = repository.strip().split('/', 1)
     return len(parts) == 2 and bool(parts[0]) and bool(parts[1])
+
+
+async def _update_jira_issue_status(
+    issue_key: str,
+    execution_id: str,
+) -> None:
+    """Update Jira issue status when the agent starts working on it.
+
+    Transitions the issue to 'In Progress' and adds a comment
+    indicating OpenHands has started working.
+
+    This is a best-effort operation: failures are logged but do
+    not block the automation flow.
+    """
+    import traceback
+
+    try:
+        # Transition issue to In Progress
+        result = mark_issue_in_progress(issue_key)
+        if result:
+            logger.info(
+                '[Automation] Jira issue %s transitioned to In Progress '
+                '(execution: %s)',
+                issue_key, execution_id,
+                extra=build_log_context(
+                    execution_id=execution_id,
+                    jira_issue_key=issue_key,
+                ),
+            )
+        else:
+            logger.warning(
+                '[Automation] Could not transition Jira issue %s '
+                'to In Progress - no matching transition found '
+                '(execution: %s)',
+                issue_key, execution_id,
+                extra=build_log_context(
+                    execution_id=execution_id,
+                    jira_issue_key=issue_key,
+                ),
+            )
+
+        # Add a comment that OpenHands has started working
+        add_comment(
+            issue_key,
+            'OpenHands has started working on this issue. '
+            f'(Execution ID: {execution_id})',
+        )
+        logger.info(
+            '[Automation] Posted started-working comment on Jira issue %s '
+            '(execution: %s)',
+            issue_key, execution_id,
+            extra=build_log_context(
+                execution_id=execution_id,
+                jira_issue_key=issue_key,
+            ),
+        )
+
+    except Exception:
+        logger.error(
+            '[Automation] Failed to update Jira issue status for %s: %s',
+            issue_key, traceback.format_exc(),
+            extra=build_log_context(
+                execution_id=execution_id,
+                jira_issue_key=issue_key,
+            ),
+        )
 
 
 @dataclass
@@ -471,6 +540,14 @@ class JiraAutomationService:
                 ExecutionState.RUNNING,
                 conversation_id=conversation_id,
             )
+
+            # ── Update Jira issue status ──────────────────────────────
+            # Transition the issue to In Progress and add a comment
+            # indicating OpenHands has started working on it.
+            # These calls are best-effort: failures are logged but
+            # do not block the overall automation flow.
+            await _update_jira_issue_status(issue_key, execution_id)
+
             return {
                 'status': 'running',
                 'execution_id': execution_id,

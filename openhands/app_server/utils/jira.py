@@ -11,10 +11,13 @@ Requires env vars: JIRA_EMAIL, JIRA_API_KEY, and JIRA_DOMAIN or JIRA_URL.
 
 import base64
 import json
+import logging
 import os
 import urllib.error
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime
+
+logger = logging.getLogger(__name__)
 
 
 def _format_ts(ts: str | None) -> str:
@@ -188,6 +191,114 @@ def update_comment(issue_key: str, comment_id: str, body) -> dict:
         ) from e
     except urllib.error.URLError as e:
         raise RuntimeError(f'Jira connection error: {e.reason}') from e
+
+
+def get_transitions(issue_key: str) -> list[dict]:
+    """Get available transitions for a Jira issue.
+
+    Args:
+        issue_key: Jira issue key (e.g. "KAN-23").
+
+    Returns:
+        List of transition dicts, each containing at least 'id' and 'name'.
+
+    Raises:
+        ValueError: If required env vars are missing.
+        RuntimeError: If the API call fails.
+    """
+    email, api_key, domain = _get_auth()
+    url = (
+        f'https://{domain}/rest/api/3/issue/{issue_key}/transitions'
+    )
+
+    req = urllib.request.Request(url, headers=_auth_headers(email, api_key))
+
+    try:
+        with urllib.request.urlopen(req) as resp:
+            data = json.loads(resp.read().decode())
+            return data.get('transitions', [])
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(
+            f'Jira API error (HTTP {e.code}): {e.read().decode()}'
+        ) from e
+    except urllib.error.URLError as e:
+        raise RuntimeError(f'Jira connection error: {e.reason}') from e
+
+
+def transition_issue(issue_key: str, transition_id: str) -> dict:
+    """Transition a Jira issue to a new state.
+
+    Args:
+        issue_key: Jira issue key (e.g. "KAN-23").
+        transition_id: The ID of the transition to apply.
+
+    Returns:
+        Response dict from the Jira API.
+
+    Raises:
+        ValueError: If required env vars are missing.
+        RuntimeError: If the API call fails.
+    """
+    email, api_key, domain = _get_auth()
+    url = (
+        f'https://{domain}/rest/api/3/issue/{issue_key}/transitions'
+    )
+    payload = json.dumps({
+        'transition': {'id': transition_id},
+    }).encode('utf-8')
+
+    req = urllib.request.Request(
+        url, data=payload, headers=_auth_headers(email, api_key),
+        method='POST',
+    )
+
+    try:
+        with urllib.request.urlopen(req) as resp:
+            if resp.status == 204:
+                return {'status': 'success', 'transition_id': transition_id}
+            return json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(
+            f'Jira API error (HTTP {e.code}): {e.read().decode()}'
+        ) from e
+    except urllib.error.URLError as e:
+        raise RuntimeError(f'Jira connection error: {e.reason}') from e
+
+
+def mark_issue_in_progress(issue_key: str) -> dict | None:
+    """Transition a Jira issue to 'In Progress' status.
+
+    Looks up the available transitions for the issue and finds the one
+    matching 'In Progress' (or a configured name via JIRA_IN_PROGRESS_TRANSITION
+    env var). If found, applies the transition.
+
+    Args:
+        issue_key: Jira issue key (e.g. "KAN-23").
+
+    Returns:
+        Response dict from transition if applied, or None if no matching
+        transition was found.
+
+    Raises:
+        ValueError: If required env vars are missing.
+        RuntimeError: If the API call fails.
+    """
+    target_name = os.environ.get(
+        'JIRA_IN_PROGRESS_TRANSITION', 'In Progress'
+    ).lower()
+
+    transitions = get_transitions(issue_key)
+    for t in transitions:
+        if t.get('name', '').lower() == target_name:
+            return transition_issue(issue_key, t['id'])
+
+    logger.warning(
+        '[Jira] No "%s" transition found for issue %s '
+        '(available: %s)',
+        target_name, issue_key,
+        [t.get('name') for t in transitions],
+    )
+    return None
 
 
 TOKEN_USAGE_MARKER = 'OpenHands Automation Complete'
