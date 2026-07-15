@@ -209,56 +209,77 @@ class SandboxArchiveService:
                 # so the full path is fixed:
                 conversations_base = '/workspace/project/workspace/conversations'
                 dest = f'{conversations_base}/{cid_hex}'
-                # Use python3 zipfile (unzip is not in the sandbox image)
-                extract_cmd = (
-                    'python3 -c "'
-                    f"import zipfile, pathlib;"
-                    f"d=pathlib.Path('{dest}');"
-                    f"d.mkdir(parents=True, exist_ok=True);"
-                    f"zipfile.ZipFile('/tmp/_restore.zip').extractall(d);"
-                    f"for f in ['owner_lease.json','lease.lock','.eventlog.lock']:"
-                    f" (d/f).unlink(missing_ok=True);"
-                    f"pathlib.Path('/tmp/_restore.zip').unlink(missing_ok=True)\""
+                # Write extract and verify scripts to temp files to avoid
+                # catastrophic bash quoting issues when embedding Python
+                # code inside double-quoted -c arguments.  The agent-server
+                # image has python3 so writing a .py file is safe.
+
+                # Step A: extract the zip
+                script_extract = (
+                    'import zipfile, pathlib\n'
+                    f"d = pathlib.Path('{dest}')\n"
+                    'd.mkdir(parents=True, exist_ok=True)\n'
+                    "zipfile.ZipFile('/tmp/_restore.zip').extractall(d)\n"
+                    "for f in ['owner_lease.json','lease.lock','.eventlog.lock']:\n"
+                    '    (d / f).unlink(missing_ok=True)\n'
+                    "pathlib.Path('/tmp/_restore.zip').unlink(missing_ok=True)\n"
                 )
-                bash_resp = await self._httpx.post(
+                script_extract_path = '/tmp/_oh_extract.py'
+                upload_extract_resp = await self._httpx.post(
+                    f'{agent_server_url}/api/file/upload?path={script_extract_path}',
+                    headers=headers,
+                    files={'file': script_extract.encode('utf-8')},
+                    timeout=30.0,
+                )
+                upload_extract_resp.raise_for_status()
+
+                extract_resp = await self._httpx.post(
                     f'{agent_server_url}/api/bash/execute_bash_command',
-                    json={'command': extract_cmd},
+                    json={'command': f'python3 {script_extract_path}'},
                     headers=headers,
                     timeout=30.0,
                 )
-                bash_resp.raise_for_status()
+                extract_resp.raise_for_status()
 
-                # Verify the extract landed where expected and strip stale
-                # MCP config from base_state.json so the agent-server
-                # doesn't try to reconnect to dead MCP servers from the
-                # old sandbox container.
-                verify_cmd = (
-                    'python3 -c "'
-                    'import json, pathlib, sys;'
-                    f"d=pathlib.Path('{dest}');"
-                    'bs=d/\'base_state.json\';'
-                    'if not bs.exists():'
-                    "  print(f'base_state.json NOT FOUND at {bs}');"
-                    '  sys.exit(1);'
-                    'data=json.loads(bs.read_text());'
-                    "data.pop('mcp_config',None);"
-                    "ag=data.get('agent',{});"
-                    "ag.pop('mcp_config',None);"
-                    "data['agent']=ag;"
-                    'bs.write_text(json.dumps(data,indent=2));'
-                    "print(f'OK base_state.json at {bs}');"
-                    'print(f\'events_count={len(list(d.glob(\"events/*.json\")))}\')"'
+                # Step B: verify and strip MCP
+                script_verify = (
+                    'import json, pathlib\n'
+                    f"d = pathlib.Path('{dest}')\n"
+                    'bs = d / "base_state.json"\n'
+                    'print(f"Looking for base_state.json at {bs}")\n'
+                    'if bs.exists():\n'
+                    '    data = json.loads(bs.read_text())\n'
+                    "    data.pop('mcp_config', None)\n"
+                    "    ag = data.get('agent', {})\n"
+                    "    ag.pop('mcp_config', None)\n"
+                    "    data['agent'] = ag\n"
+                    '    bs.write_text(json.dumps(data, indent=2))\n'
+                    '    print(f"OK base_state.json at {bs}")\n'
+                    '    events = list(d.glob("events/*.json"))\n'
+                    '    print(f"events_count={len(events)}")\n'
+                    'else:\n'
+                    '    print(f"MISSING base_state.json at {bs}")\n'
                 )
+                script_verify_path = '/tmp/_oh_verify.py'
+                upload_verify_resp = await self._httpx.post(
+                    f'{agent_server_url}/api/file/upload?path={script_verify_path}',
+                    headers=headers,
+                    files={'file': script_verify.encode('utf-8')},
+                    timeout=30.0,
+                )
+                upload_verify_resp.raise_for_status()
+
                 verify_resp = await self._httpx.post(
                     f'{agent_server_url}/api/bash/execute_bash_command',
-                    json={'command': verify_cmd},
+                    json={'command': f'python3 {script_verify_path}'},
                     headers=headers,
                     timeout=15.0,
                 )
                 verify_resp.raise_for_status()
                 verify_out = verify_resp.json().get('stdout', '') or ''
                 logger.info(
-                    '[SandboxArchive] Restore verify: %s', verify_out.strip()
+                    '[SandboxArchive] Restore verify: %s',
+                    verify_out.strip().replace('\n', ' | '),
                 )
 
                 logger.info(
