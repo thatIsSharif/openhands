@@ -145,6 +145,20 @@ class SandboxArchiveService:
         """
         import uuid as _uuid
 
+        # The agent-server persistence layer stores conversations under
+        # ``conversations_dir / conversation_id.hex`` (UUID without dashes).
+        # The download-trajectory zip contains only the file contents (no
+        # outer directory), so we must restore into the hex‑named directory.
+        try:
+            cid_hex = _uuid.UUID(conversation_id).hex
+        except (ValueError, AttributeError, TypeError):
+            logger.error(
+                '[SandboxArchive] Invalid conversation_id %r',
+                conversation_id,
+                exc_info=True,
+            )
+            return False
+
         try:
             archive_b64 = self._s3.read(s3_key)
             archive_data = base64.b64decode(archive_b64)
@@ -154,12 +168,6 @@ class SandboxArchiveService:
                 self._s3._get_bucket_name(), s3_key, exc_info=True,
             )
             return False
-
-        # The agent-server persistence layer stores conversations under
-        # ``conversations_dir / conversation_id.hex`` (UUID without dashes).
-        # The download-trajectory zip contains only the file contents (no
-        # outer directory), so we must restore into the hex‑named directory.
-        cid_hex = _uuid.UUID(conversation_id).hex
 
         try:
             with tempfile.TemporaryDirectory() as tmp:
