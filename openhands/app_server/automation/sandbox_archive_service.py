@@ -260,6 +260,35 @@ class SandboxArchiveService:
                 )
                 bash_resp.raise_for_status()
 
+                # Strip stale MCP config from base_state.json — the
+                # archived conversation had MCP servers running inside the
+                # OLD sandbox container that no longer exists.  If we leave
+                # them in place the agent-server will try to reconnect,
+                # fail with McpError: Connection closed, and crash during
+                # _initialize.
+                strip_mcp_cmd = (
+                    'python3 -c "'
+                    'import json, pathlib;'
+                    f"p=pathlib.Path('{dest}/base_state.json');"
+                    'd=json.loads(p.read_text());'
+                    "d.pop('mcp_config',None);"
+                    "ag=d.get('agent',{});"
+                    "ag.pop('mcp_config',None);"
+                    "d['agent']=ag;"
+                    'p.write_text(json.dumps(d,indent=2))"'
+                )
+                strip_resp = await self._httpx.post(
+                    f'{agent_server_url}/api/bash/execute_bash_command',
+                    json={'command': strip_mcp_cmd},
+                    headers=headers,
+                    timeout=15.0,
+                )
+                strip_resp.raise_for_status()
+                logger.info(
+                    '[SandboxArchive] Stripped stale MCP config from '
+                    'base_state.json'
+                )
+
                 logger.info(
                     '[SandboxArchive] Restored conversation %s from %s',
                     conversation_id, s3_key,
