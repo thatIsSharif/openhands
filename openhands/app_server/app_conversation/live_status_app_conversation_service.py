@@ -965,10 +965,10 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
     ) -> dict:
         """Set up secrets for all git provider authentication.
 
-        When the GitHub App is configured, the ``GITHUB_TOKEN`` secret
-        is populated with a freshly-minted installation access token
-        (via ``GitHubAppTokenManager``).  If GitHub App is not available,
-        falls back to the user's PAT.
+        Uses the GitHub App installation token for ``GITHUB_TOKEN``
+        (via ``GitHubAppTokenManager``).  When the GitHub App is not
+        configured, no ``GITHUB_TOKEN`` secret is injected — there is
+        no PAT fallback.
 
         Args:
             user: User information containing authentication details.
@@ -988,7 +988,6 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
         if not provider_tokens:
             return secrets
 
-        # Create secrets for each provider token
         for provider_type, provider_token in provider_tokens.items():
             if not provider_token.token:
                 continue
@@ -997,24 +996,21 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
             description = f'{provider_type.name} authentication token'
 
             # ── GitHub App injection ─────────────────────────────────
-            # When the GitHub App is configured, inject a fresh
-            # installation token for GITHUB_TOKEN instead of the user's
-            # PAT.  The token is cached and auto-refreshed server-side.
+            # Inject a fresh installation token for GITHUB_TOKEN.
+            # The token is cached and auto-refreshed server-side.
             if provider_type == ProviderType.GITHUB:
                 gh_app_token = await self._resolve_github_app_token(
                     selected_repository,
                 )
                 if gh_app_token:
-                    # The agent sandbox receives the real token value
-                    # so it can use gh CLI / git push immediately.
                     secrets[secret_name] = StaticSecret(
                         value=SecretStr(gh_app_token),
                         description=description,
                     )
-                    continue
 
-            if self.web_url:
-                # Create an access token for web-based authentication
+            # Other providers (GitLab, Bitbucket, etc.) still use the
+            # LookupSecret pattern via webhook/secrets endpoint.
+            elif self.web_url:
                 access_token = self.jwt_service.create_jws_token(
                     payload={
                         'user_id': user.id,
@@ -1030,11 +1026,13 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
                     description=description,
                 )
             else:
-                # Use static token for environments without web URL access
-                static_token = await self.user_context.get_latest_token(provider_type)
+                static_token = await self.user_context.get_latest_token(
+                    provider_type
+                )
                 if static_token:
                     secrets[secret_name] = StaticSecret(
-                        value=SecretStr(static_token), description=description
+                        value=SecretStr(static_token),
+                        description=description,
                     )
 
         return secrets

@@ -78,9 +78,9 @@ BLOCKED_SECRET_PREFIXES: tuple[str, ...] = ('LLM_',)
 # -----------------------------------------------------------------------------
 OVERRIDABLE_SYSTEM_SECRETS: frozenset[str] = frozenset(
     {
-        # Git Provider Tokens - users may provide their own credentials
+        # Git Provider Tokens (non-GitHub) — users may provide their own credentials
         # Note: Provider tokens are fetched via app-server API, not container env
-        'GITHUB_TOKEN',
+        # GitHub is NOT listed here: authentication uses GitHub App installation tokens only.
         'GITLAB_TOKEN',
         'BITBUCKET_TOKEN',
         'AZURE_DEVOPS_TOKEN',

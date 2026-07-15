@@ -24,8 +24,6 @@ class GitHubMixinBase(BaseGitService, HTTPClient):
     GRAPHQL_URL: str
 
     # Optional repository context for GitHub App token resolution.
-    # When set, _get_headers prefers a GitHub App installation token
-    # over the user PAT.
     selected_repository: str | None = None
 
     @staticmethod
@@ -41,37 +39,25 @@ class GitHubMixinBase(BaseGitService, HTTPClient):
                 return entry.get('email')
         return None
 
-    async def _get_headers(
-        self,
-        *,
-        use_github_app: bool = True,
-    ) -> dict:
-        """Retrieve the GH Token from settings store to construct the headers.
+    async def _get_headers(self) -> dict:
+        """Retrieve a GitHub App installation token for headers.
 
-        When ``use_github_app`` is True (default) and the GitHub App is
-        configured, returns an installation access token.  Set
-        ``use_github_app=False`` for user-scoped endpoints (``/user``,
-        ``/user/emails``) that installation tokens cannot authenticate.
-
-        Falls back to the user PAT (``self.token``) when the GitHub App
-        is unavailable or ``use_github_app`` is False.
+        Uses GitHub App exclusively. Raises if GitHub App is not
+        configured — there is no PAT fallback.
         """
-        if use_github_app:
-            gh_app_token = await self._resolve_github_app_token()
-            if gh_app_token:
-                return {
-                    'Authorization': f'Bearer {gh_app_token}',
-                    'Accept': 'application/vnd.github.v3+json',
-                }
+        token = await self._resolve_github_app_token()
+        if not token:
+            from openhands.app_server.utils.github_app import (
+                GitHubAppNotConfiguredError,
+            )
 
-        # Fall back to the user PAT
-        if not self.token:
-            latest_token = await self.get_latest_token()
-            if latest_token:
-                self.token = latest_token
+            raise GitHubAppNotConfiguredError(
+                'GitHub App not configured. '
+                'Set GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY.'
+            )
 
         return {
-            'Authorization': f'Bearer {self.token.get_secret_value() if self.token else ""}',
+            'Authorization': f'Bearer {token}',
             'Accept': 'application/vnd.github.v3+json',
         }
 
@@ -99,29 +85,26 @@ class GitHubMixinBase(BaseGitService, HTTPClient):
 
             return GitHubAppTokenManager.get_token_for_installation()
         except Exception:
-            import logging as _logging
-
-            _logging.getLogger(__name__).exception(
-                'Failed to resolve GitHub App token, falling back to PAT'
-            )
+            logger.exception('Failed to resolve GitHub App token')
             return None
 
-    async def get_latest_token(self) -> SecretStr | None:  # type: ignore[override]
-        return self.token
+    async def get_latest_token(self) -> SecretStr | None:
+        """Satisfy the abstract method from ``HTTPClient``.
+
+        Returns ``None`` because PAT-based token refresh is not
+        supported — only GitHub App installation tokens are used.
+        """
+        return None
 
     async def _make_request(
         self,
         url: str,
         params: dict | None = None,
         method: RequestMethod = RequestMethod.GET,
-        *,
-        use_github_app: bool = True,
     ) -> tuple[Any, dict]:  # type: ignore[override]
         try:
             async with httpx.AsyncClient(verify=httpx_verify_option()) as client:
-                github_headers = await self._get_headers(
-                    use_github_app=use_github_app,
-                )
+                github_headers = await self._get_headers()
 
                 # Make initial request
                 response = await self.execute_request(
@@ -134,10 +117,9 @@ class GitHubMixinBase(BaseGitService, HTTPClient):
 
                 # Handle token refresh if needed
                 if self.refresh and self._has_token_expired(response.status_code):
-                    await self.get_latest_token()
-                    github_headers = await self._get_headers(
-                        use_github_app=use_github_app,
-                    )
+                    # Re-resolve a fresh GitHub App installation token
+                    # and retry the request
+                    github_headers = await self._get_headers()
                     response = await self.execute_request(
                         client=client,
                         url=url,
@@ -188,15 +170,13 @@ class GitHubMixinBase(BaseGitService, HTTPClient):
     async def get_user_emails(self) -> list[dict]:
         """Fetch the authenticated user's email addresses from GitHub.
 
-        Calls GET /user/emails which returns a list of email objects, each
-        containing 'email', 'primary', 'verified', and 'visibility' fields.
-        Requires the user:email OAuth scope.
-
-        Note: uses ``use_github_app=False`` because installation tokens
-        cannot authenticate user-scoped endpoints.
+        NOTE: This endpoint requires a user PAT.  With GitHub App
+        installation tokens it will fail with 403.  The calling code
+        in ``provider.py`` handles this gracefully by falling through
+        to other configured providers.
         """
         url = f'{self.BASE_URL}/user/emails'
-        response, _ = await self._make_request(url, use_github_app=False)
+        response, _ = await self._make_request(url)
         return response
 
     async def verify_access(self) -> bool:
@@ -205,8 +185,15 @@ class GitHubMixinBase(BaseGitService, HTTPClient):
         return True
 
     async def get_user(self):
+        """Fetch the authenticated GitHub user.
+
+        NOTE: This endpoint requires a user PAT.  With GitHub App
+        installation tokens it will fail with 403.  The calling code
+        in ``provider.py`` handles this gracefully by falling through
+        to other configured providers.
+        """
         url = f'{self.BASE_URL}/user'
-        response, _ = await self._make_request(url, use_github_app=False)
+        response, _ = await self._make_request(url)
 
         email = response.get('email')
         if email is None:
