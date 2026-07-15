@@ -175,7 +175,7 @@ class SandboxArchiveService:
 
                 # Upload the archive to a temp location inside the sandbox
                 upload_resp = await self._httpx.post(
-                    f'{agent_server_url}/file/upload?path=/tmp/_restore.zip',
+                    f'{agent_server_url}/api/file/upload?path=/tmp/_restore.zip',
                     headers=headers,
                     files={'file': conv_zip.read_bytes()},
                     timeout=120.0,
