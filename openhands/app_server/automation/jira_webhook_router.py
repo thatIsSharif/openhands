@@ -704,7 +704,6 @@ async def _restore_archived_conversation(
     False if anything failed (caller should fall back to new conversation).
     """
     try:
-        from openhands.agent_server.models import SendMessageRequest, TextContent
         from openhands.app_server.automation.input_sanitizer import (
             has_dangerous_patterns,
         )
