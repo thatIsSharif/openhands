@@ -41,28 +41,20 @@ class GitHubMixinBase(BaseGitService, HTTPClient):
                 return entry.get('email')
         return None
 
-    async def _get_headers(
-        self,
-        *,
-        use_github_app: bool = True,
-    ) -> dict:
+    async def _get_headers(self) -> dict:
         """Retrieve the GH Token from settings store to construct the headers.
 
-        When ``use_github_app`` is True (default) and the GitHub App is
-        configured, returns an installation access token.  Set
-        ``use_github_app=False`` for user-scoped endpoints (``/user``,
-        ``/user/emails``) that installation tokens cannot authenticate.
-
-        Falls back to the user PAT (``self.token``) when the GitHub App
-        is unavailable or ``use_github_app`` is False.
+        Prefers a GitHub App installation token when the GitHub App is
+        configured and ``selected_repository`` is set. Falls back to the
+        user PAT (``self.token``).
         """
-        if use_github_app:
-            gh_app_token = await self._resolve_github_app_token()
-            if gh_app_token:
-                return {
-                    'Authorization': f'Bearer {gh_app_token}',
-                    'Accept': 'application/vnd.github.v3+json',
-                }
+        # Try GitHub App token first (auto-refreshing, no staleness worries)
+        gh_app_token = await self._resolve_github_app_token()
+        if gh_app_token:
+            return {
+                'Authorization': f'Bearer {gh_app_token}',
+                'Accept': 'application/vnd.github.v3+json',
+            }
 
         # Fall back to the user PAT
         if not self.token:
@@ -114,14 +106,10 @@ class GitHubMixinBase(BaseGitService, HTTPClient):
         url: str,
         params: dict | None = None,
         method: RequestMethod = RequestMethod.GET,
-        *,
-        use_github_app: bool = True,
     ) -> tuple[Any, dict]:  # type: ignore[override]
         try:
             async with httpx.AsyncClient(verify=httpx_verify_option()) as client:
-                github_headers = await self._get_headers(
-                    use_github_app=use_github_app,
-                )
+                github_headers = await self._get_headers()
 
                 # Make initial request
                 response = await self.execute_request(
@@ -135,9 +123,7 @@ class GitHubMixinBase(BaseGitService, HTTPClient):
                 # Handle token refresh if needed
                 if self.refresh and self._has_token_expired(response.status_code):
                     await self.get_latest_token()
-                    github_headers = await self._get_headers(
-                        use_github_app=use_github_app,
-                    )
+                    github_headers = await self._get_headers()
                     response = await self.execute_request(
                         client=client,
                         url=url,
@@ -191,12 +177,9 @@ class GitHubMixinBase(BaseGitService, HTTPClient):
         Calls GET /user/emails which returns a list of email objects, each
         containing 'email', 'primary', 'verified', and 'visibility' fields.
         Requires the user:email OAuth scope.
-
-        Note: uses ``use_github_app=False`` because installation tokens
-        cannot authenticate user-scoped endpoints.
         """
         url = f'{self.BASE_URL}/user/emails'
-        response, _ = await self._make_request(url, use_github_app=False)
+        response, _ = await self._make_request(url)
         return response
 
     async def verify_access(self) -> bool:
@@ -206,7 +189,7 @@ class GitHubMixinBase(BaseGitService, HTTPClient):
 
     async def get_user(self):
         url = f'{self.BASE_URL}/user'
-        response, _ = await self._make_request(url, use_github_app=False)
+        response, _ = await self._make_request(url)
 
         email = response.get('email')
         if email is None:
