@@ -16,9 +16,25 @@ _logger = logging.getLogger(__name__)
 
 # Priority-ordered list of env-var names to check for each LLM field.
 # The first non-empty value wins.
-_MODEL_ENV_VARS = ('OH_LLM_MODEL', 'LLM_MODEL')
-_API_KEY_ENV_VARS = ('OH_LLM_API_KEY', 'LLM_API_KEY')
-_BASE_URL_ENV_VARS = ('OH_LLM_BASE_URL', 'LLM_BASE_URL')
+#
+# The OH_JIRA_ANALYSIS_* vars are listed first because they are the ones
+# explicitly set by the user for automation/agent LLM configuration.
+# OH_LLM_* / LLM_* are generic fallbacks.
+_MODEL_ENV_VARS = (
+    'OH_JIRA_ANALYSIS_MODEL',
+    'OH_LLM_MODEL',
+    'LLM_MODEL',
+)
+_API_KEY_ENV_VARS = (
+    'OH_JIRA_ANALYSIS_API_KEY',
+    'OH_LLM_API_KEY',
+    'LLM_API_KEY',
+)
+_BASE_URL_ENV_VARS = (
+    'OH_JIRA_ANALYSIS_BASE_URL',
+    'OH_LLM_BASE_URL',
+    'LLM_BASE_URL',
+)
 
 
 def _first_non_empty(*names: str) -> str | None:
@@ -32,6 +48,11 @@ def _first_non_empty(*names: str) -> str | None:
 
 def build_agent_settings_from_env() -> dict:
     """Build a minimal ``agent_settings`` dict from environment variables.
+
+    Checks (in priority order):
+      ``OH_JIRA_ANALYSIS_MODEL`` / ``OH_JIRA_ANALYSIS_API_KEY`` / ``OH_JIRA_ANALYSIS_BASE_URL``
+      ``OH_LLM_MODEL`` / ``OH_LLM_API_KEY`` / ``OH_LLM_BASE_URL``
+      ``LLM_MODEL`` / ``LLM_API_KEY`` / ``LLM_BASE_URL``
 
     Returns a dict with structure suitable for ``POST /api/conversations``
     ``agent_settings`` field:
