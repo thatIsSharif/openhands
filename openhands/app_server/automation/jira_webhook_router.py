@@ -839,12 +839,20 @@ async def _restore_archived_conversation(
                 conversation_id, archived.max_iterations or 500,
             )
 
-            # Build agent_settings from the app-server's own config so
-            # the LLM API key / base_url are populated (a fresh sandbox
-            # has no settings.json and therefore returns api_key=null
-            # regardless of X-Expose-Secrets).
+            # Build agent_settings from the app-server's SettingsStore
+            # (settings.json saved via the UI).  A fresh sandbox has no
+            # settings.json and returns api_key=null regardless of the
+            # X-Expose-Secrets header, so we MUST supply agent_settings
+            # from the app-server side.
+            #
+            # If settings.json doesn't exist (env-var-only setup), we
+            # fall back to constructing a minimal config from the
+            # environment via build_agent_settings_from_env().
             from openhands.app_server.shared import (
                 SettingsStoreImpl,
+            )
+            from openhands.app_server.automation.env_config import (
+                build_agent_settings_from_env,
             )
 
             settings_store = await SettingsStoreImpl.get_instance(user_id=None)
@@ -854,16 +862,16 @@ async def _restore_archived_conversation(
                     mode='json',
                     context={'expose_secrets': True},
                 )
+                logger.info(
+                    '[Automation] Restore step 5/6: using settings from '
+                    'SettingsStore'
+                )
             else:
                 logger.warning(
-                    '[Automation] No app-server settings found; '
-                    'agent may lack LLM configuration'
+                    '[Automation] No settings.json found; falling back to '
+                    'env vars'
                 )
-                agent_settings = {}
-            logger.info(
-                '[Automation] Restore step 5/6: built agent_settings '
-                'from app-server config'
-            )
+                agent_settings = build_agent_settings_from_env()
 
             start_req: dict[str, object] = {
                 'conversation_id': str(conversation_id),
