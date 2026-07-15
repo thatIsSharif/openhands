@@ -208,19 +208,25 @@ class SandboxArchiveService:
                 # bash-session CWD, NOT the agent-server CWD, and the
                 # config.conversations_path is resolved relative to the
                 # *agent-server* CWD (``Path('workspace/conversations')``
-                # becomes ``/workspace/conversations`` when the server runs
-                # from ``/``).
+                # becomes ``/workspace/project/workspace/conversations``
+                # when the server runs from ``/workspace/project``).
+                #
+                # The agent-server is started via
+                # ``tini -- python /app/__main__.py``, so its cmdline
+                # contains ``/app/__main__.py`` which is unique.
+                # Iterate /proc and look for this exact marker.
                 cwd_cmd = (
                     'python3 -c "'
                     'import os;'
-                    "for e in os.listdir('/proc'):"
+                    "for e in sorted(os.listdir('/proc'), key=int):"
                     '  if e.isdigit():'
                     '    try:'
                     "      cl = open(f'/proc/{e}/cmdline').read()"
-                    "      if 'python' in cl and ('agent_server' in cl"
-                    "                         or 'uvicorn' in cl):"
+                    "      if '/app/__main__.py' in cl:"
                     "        print(os.readlink(f'/proc/{e}/cwd')); break"
                     '    except: pass'
+                    'else:'
+                    "  print('/workspace/project')"  # fallback
                     '"'
                 )
                 cwd_resp = await self._httpx.post(
