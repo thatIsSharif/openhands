@@ -670,13 +670,49 @@ async def _restore_archived_pr_conversation(
                 return None
 
             # Start conversation (resume path)
+            # Fetch agent_settings from sandbox so the request passes
+            # Pydantic validation (agent or agent_settings is required).
+            agent_settings = None
+            try:
+                settings_resp = await httpx_client.get(
+                    f'{agent_url}/api/settings',
+                    headers={'X-Session-API-Key': sandbox.session_api_key},
+                    timeout=15.0,
+                )
+                settings_resp.raise_for_status()
+                agent_settings = settings_resp.json().get('agent_settings')
+            except Exception:
+                logger.warning(
+                    '[Automation] Could not fetch agent_settings for '
+                    'PR #%d, falling back to minimal agent', pr_number,
+                    exc_info=True,
+                )
+
+            start_req: dict[str, object] = {
+                'conversation_id': conversation_id,
+                'workspace': {'working_dir': '/workspace/project'},
+                'max_iterations': archived.max_iterations or 500,
+            }
+            if agent_settings:
+                start_req['agent_settings'] = agent_settings
+            else:
+                start_req['agent'] = {
+                    'kind': 'Agent',
+                    'llm': {
+                        'model': conv_info.llm_model
+                        if conv_info and conv_info.llm_model
+                        else 'anthropic/claude-3-5-sonnet-20241022',
+                    },
+                    'tools': [
+                        {'name': 'TerminalTool'},
+                        {'name': 'FileEditorTool'},
+                        {'name': 'TaskTrackerTool'},
+                    ],
+                }
+
             resp = await httpx_client.post(
                 f'{agent_url}/api/conversations',
-                json={
-                    'conversation_id': conversation_id,
-                    'workspace': {'working_dir': '/workspace/project'},
-                    'max_iterations': archived.max_iterations or 500,
-                },
+                json=start_req,
                 headers={'X-Session-API-Key': sandbox.session_api_key},
                 timeout=120.0,
             )

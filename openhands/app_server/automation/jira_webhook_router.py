@@ -838,11 +838,57 @@ async def _restore_archived_conversation(
                 '(conversation_id=%s, max_iterations=%d)',
                 conversation_id, archived.max_iterations or 500,
             )
-            start_req = {
+
+            # Fetch agent_settings from the sandbox so the request passes
+            # Pydantic validation (agent or agent_settings is required).
+            # On resume ConversationState.create() overwrites the agent
+            # with the one from the persisted base_state.json, so the
+            # sandbox's current settings are only used for validation.
+            agent_settings = None
+            try:
+                settings_resp = await httpx_client.get(
+                    f'{agent_url}/api/settings',
+                    headers={'X-Session-API-Key': sandbox.session_api_key},
+                    timeout=15.0,
+                )
+                settings_resp.raise_for_status()
+                settings_data = settings_resp.json()
+                agent_settings = settings_data.get('agent_settings')
+                logger.info(
+                    '[Automation] Restore step 5/6: fetched agent_settings '
+                    'from sandbox'
+                )
+            except Exception:
+                logger.warning(
+                    '[Automation] Restore step 5/6: could not fetch '
+                    'agent_settings, trying without',
+                    exc_info=True,
+                )
+
+            start_req: dict[str, object] = {
                 'conversation_id': conversation_id,
                 'workspace': {'working_dir': '/workspace/project'},
                 'max_iterations': archived.max_iterations or 500,
             }
+            if agent_settings:
+                start_req['agent_settings'] = agent_settings
+            else:
+                # Fallback: minimal dummy agent to pass validation.
+                # The persisted agent from base_state.json takes over on resume.
+                start_req['agent'] = {
+                    'kind': 'Agent',
+                    'llm': {
+                        'model': conv_info.llm_model
+                        if conv_info and conv_info.llm_model
+                        else 'anthropic/claude-3-5-sonnet-20241022',
+                    },
+                    'tools': [
+                        {'name': 'TerminalTool'},
+                        {'name': 'FileEditorTool'},
+                        {'name': 'TaskTrackerTool'},
+                    ],
+                }
+
             resp = await httpx_client.post(
                 f'{agent_url}/api/conversations',
                 json=start_req,
