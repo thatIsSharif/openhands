@@ -625,7 +625,7 @@ async def _restore_archived_pr_conversation(
 
             # Create fresh sandbox
             sandbox = await sandbox_service.start_sandbox()
-            await sandbox_service.wait_for_sandbox_running(
+            sandbox = await sandbox_service.wait_for_sandbox_running(
                 sandbox.id, timeout=120, poll_interval=2,
             )
 
