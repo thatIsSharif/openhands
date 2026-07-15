@@ -149,15 +149,20 @@ class SandboxArchiveService:
         # ``conversations_dir / conversation_id.hex`` (UUID without dashes).
         # The download-trajectory zip contains only the file contents (no
         # outer directory), so we must restore into the hex‑named directory.
-        try:
-            cid_hex = _uuid.UUID(conversation_id).hex
-        except (ValueError, AttributeError, TypeError):
-            logger.error(
-                '[SandboxArchive] Invalid conversation_id %r',
-                conversation_id,
-                exc_info=True,
-            )
-            return False
+        # conversation_id may be a UUID object (from Pydantic model) or a
+        # string (from execution store). Normalize before calling `.hex`.
+        if isinstance(conversation_id, _uuid.UUID):
+            cid_hex = conversation_id.hex
+        else:
+            try:
+                cid_hex = _uuid.UUID(conversation_id).hex
+            except (ValueError, AttributeError, TypeError):
+                logger.error(
+                    '[SandboxArchive] Invalid conversation_id %r',
+                    conversation_id,
+                    exc_info=True,
+                )
+                return False
 
         try:
             archive_b64 = self._s3.read(s3_key)
