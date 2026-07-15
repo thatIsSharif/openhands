@@ -114,11 +114,8 @@ class AutomationEventCallbackProcessor(EventCallbackProcessor):
         )
 
         # ── Run deterministic post-execution operations ──────────────
-        if (
-            self._state is not None
-            and self._request is not None
-            and exec_status == ConversationExecutionStatus.FINISHED
-        ):
+        # (only on FINISHED — skip on ERROR/STUCK)
+        if exec_status == ConversationExecutionStatus.FINISHED:
             await self._run_post_execution(record, conversation_id)
 
         # ── Update execution record ──────────────────────────────────
@@ -128,7 +125,7 @@ class AutomationEventCallbackProcessor(EventCallbackProcessor):
             conversation_id=str(conversation_id),
         )
 
-        # ── Pause the sandbox ────────────────────────────────────────
+        # ── Pause the sandbox (only if request context is available) ─
         if self._state is not None and self._request is not None:
             await self._pause_sandbox(conversation_id)
 
@@ -149,26 +146,28 @@ class AutomationEventCallbackProcessor(EventCallbackProcessor):
         record: 'ExecutionRecord',
         conversation_id: UUID,
     ) -> None:
-        """Dispatch to the correct post-execution handler by source type."""
+        """Dispatch to the correct post-execution handler by source type.
+
+        Attempts to resolve sandbox info for git operations. External
+        API calls (GitHub, Jira) work regardless of sandbox access.
+        """
         agent_server_url, session_api_key = (
             await self._resolve_sandbox_info(conversation_id)
         )
-        if not agent_server_url or not session_api_key:
-            logger.warning(
-                '[Automation] Cannot run post-execution: no sandbox info '
-                f'for conversation {conversation_id}'
-            )
-            return
 
         source = record.source_type or ''
         if source == SourceType.JIRA.value:
             await self._handle_jira_post(
-                record, agent_server_url, session_api_key,
-                str(conversation_id),
+                record,
+                agent_server_url=agent_server_url,
+                session_api_key=session_api_key,
+                conversation_id_str=str(conversation_id),
             )
         elif source == SourceType.GITHUB.value:
             await self._handle_github_post(
-                record, agent_server_url, session_api_key,
+                record,
+                agent_server_url=agent_server_url,
+                session_api_key=session_api_key,
             )
         else:
             logger.info(
@@ -179,7 +178,19 @@ class AutomationEventCallbackProcessor(EventCallbackProcessor):
     async def _resolve_sandbox_info(
         self, conversation_id: UUID,
     ) -> tuple[str | None, str | None]:
-        """Resolve agent_server_url and session_api_key from the sandbox."""
+        """Resolve agent_server_url and session_api_key from the sandbox.
+
+        Returns (None, None) when request context is unavailable or
+        sandbox cannot be resolved — callers skip git operations.
+        """
+        if not self._state or not self._request:
+            logger.info(
+                '[Automation] No request context available for '
+                f'conversation {conversation_id} — sandbox-dependent '
+                'operations will be skipped'
+            )
+            return None, None
+
         try:
             from openhands.app_server.automation.github_webhook_router import (
                 _get_agent_url_from_sandbox,
@@ -228,8 +239,8 @@ class AutomationEventCallbackProcessor(EventCallbackProcessor):
     async def _handle_jira_post(
         self,
         record: 'ExecutionRecord',
-        agent_server_url: str,
-        session_api_key: str,
+        agent_server_url: str | None,
+        session_api_key: str | None,
         conversation_id_str: str,
     ) -> None:
         """Commit changes, push, create PR, transition Jira, post tokens."""
@@ -237,69 +248,72 @@ class AutomationEventCallbackProcessor(EventCallbackProcessor):
         if not jira_key:
             return
 
-        # 1. Git commit and push
-        pr_number: int | None = None
-        pr_url: str | None = None
+        # ── 1. Git commit and push (only if sandbox is accessible) ───
+        has_sandbox = bool(agent_server_url and session_api_key)
 
-        try:
-            from .services.sandbox_git_service import SandboxGitService
+        if has_sandbox:
+            try:
+                from .services.sandbox_git_service import SandboxGitService
 
-            git = SandboxGitService(
-                agent_server_url, session_api_key, self._project_dir,
+                git = SandboxGitService(
+                    agent_server_url, session_api_key, self._project_dir,
+                )
+
+                has_changes = await git.has_changes()
+                if has_changes:
+                    commit_hash = await git.commit_all(
+                        f'[Automation] {jira_key}: code changes from OpenHands',
+                    )
+                    await git.push(record.branch or 'main')
+                    logger.info(
+                        f'[Automation] Pushed {commit_hash} to '
+                        f'{record.branch} for {jira_key}',
+                    )
+                else:
+                    logger.info(
+                        f'[Automation] No changes to commit for {jira_key}',
+                    )
+            except Exception:
+                logger.error(
+                    f'[Automation] Git operations failed for {jira_key}:',
+                    exc_info=True,
+                )
+        else:
+            logger.info(
+                f'[Automation] Skipping git operations for {jira_key}: '
+                'sandbox not accessible from this context',
             )
 
-            has_changes = await git.has_changes()
-            if has_changes:
-                commit_hash = await git.commit_all(
-                    f'[Automation] {jira_key}: code changes from OpenHands',
+        # ── 2. Create PR (GitHub API, doesn't need sandbox) ──────────
+        if record.repository:
+            try:
+                from .services.github_api_service import GitHubApiService
+
+                gh = GitHubApiService()
+                pr = await gh.create_pull_request(
+                    repo=record.repository,
+                    title=f'[Automation] {jira_key} — code changes',
+                    body=(
+                        f'Automated changes generated by OpenHands '
+                        f'for Jira issue [{jira_key}].'
+                    ),
+                    head=record.branch or 'main',
+                    base='main',
                 )
-                await git.push(record.branch or 'main')
-                logger.info(
-                    f'[Automation] Pushed {commit_hash} to '
-                    f'{record.branch} for {jira_key}',
+                pr_number = pr.get('number')
+                pr_url = pr.get('html_url')
+                if pr_url:
+                    logger.info(
+                        f'[Automation] Created PR #{pr_number} for '
+                        f'{jira_key}: {pr_url}',
+                    )
+            except Exception:
+                logger.error(
+                    f'[Automation] Failed to create PR for {jira_key}:',
+                    exc_info=True,
                 )
 
-                # 2. Create PR
-                if record.repository:
-                    try:
-                        from .services.github_api_service import (
-                            GitHubApiService,
-                        )
-
-                        gh = GitHubApiService()
-                        pr = await gh.create_pull_request(
-                            repo=record.repository,
-                            title=f'[Automation] {jira_key} — code changes',
-                            body=(
-                                f'Automated changes generated by OpenHands '
-                                f'for Jira issue [{jira_key}].'
-                            ),
-                            head=record.branch or 'main',
-                            base='main',
-                        )
-                        pr_number = pr.get('number')
-                        pr_url = pr.get('html_url')
-                        logger.info(
-                            f'[Automation] Created PR #{pr_number} for '
-                            f'{jira_key}: {pr_url}',
-                        )
-                    except Exception:
-                        logger.error(
-                            f'[Automation] Failed to create PR for '
-                            f'{jira_key}:',
-                            exc_info=True,
-                        )
-            else:
-                logger.info(
-                    f'[Automation] No changes to commit for {jira_key}',
-                )
-        except Exception:
-            logger.error(
-                f'[Automation] Git operations failed for {jira_key}:',
-                exc_info=True,
-            )
-
-        # 3. Transition Jira issue
+        # ── 3. Transition Jira issue (Jira API, doesn't need sandbox) ─
         try:
             from .services.jira_api_service import JiraApiService
 
@@ -314,36 +328,42 @@ class AutomationEventCallbackProcessor(EventCallbackProcessor):
                 exc_info=True,
             )
 
-        # 4. Fetch metrics and post token usage comment
-        try:
-            from .services.metrics_service import MetricsService
+        # ── 4. Fetch metrics and post token usage comment ────────────
+        if has_sandbox:
+            try:
+                from .services.metrics_service import MetricsService
 
-            metrics = MetricsService()
-            m = await metrics.fetch_live_metrics(
-                agent_server_url, conversation_id_str, session_api_key,
-            )
-            if m:
-                comment_adf = metrics.build_token_usage_comment(**m)
-                jira_client = JiraApiService()
-                jira_client.add_or_update_token_usage_comment(
-                    jira_key, comment_adf,
+                metrics = MetricsService()
+                m = await metrics.fetch_live_metrics(
+                    agent_server_url, conversation_id_str, session_api_key,
                 )
-                logger.info(
-                    f'[Automation] Posted token usage to {jira_key}',
+                if m:
+                    comment_adf = metrics.build_token_usage_comment(**m)
+                    jira_client = JiraApiService()
+                    jira_client.add_or_update_token_usage_comment(
+                        jira_key, comment_adf,
+                    )
+                    logger.info(
+                        f'[Automation] Posted token usage to {jira_key}',
+                    )
+                else:
+                    logger.warning(
+                        f'[Automation] No metrics returned for {jira_key}',
+                    )
+            except Exception:
+                logger.warning(
+                    f'[Automation] Failed to post token usage for '
+                    f'{jira_key}:',
+                    exc_info=True,
                 )
-        except Exception:
-            logger.warning(
-                f'[Automation] Failed to post token usage for {jira_key}:',
-                exc_info=True,
-            )
 
     # ── GitHub post-execution ───────────────────────────────────────
 
     async def _handle_github_post(
         self,
         record: 'ExecutionRecord',
-        agent_server_url: str,
-        session_api_key: str,
+        agent_server_url: str | None,
+        session_api_key: str | None,
     ) -> None:
         """Commit changes, push, and update PR comment for GitHub flows."""
         repo = record.repository
@@ -353,35 +373,43 @@ class AutomationEventCallbackProcessor(EventCallbackProcessor):
         if not repo or not pr_number:
             return
 
-        # 1. Git commit and push
-        try:
-            from .services.sandbox_git_service import SandboxGitService
+        # ── 1. Git commit and push (only if sandbox is accessible) ───
+        has_sandbox = bool(agent_server_url and session_api_key)
 
-            git = SandboxGitService(
-                agent_server_url, session_api_key, self._project_dir,
+        if has_sandbox:
+            try:
+                from .services.sandbox_git_service import SandboxGitService
+
+                git = SandboxGitService(
+                    agent_server_url, session_api_key, self._project_dir,
+                )
+
+                has_changes = await git.has_changes()
+                if has_changes:
+                    commit_hash = await git.commit_all(
+                        f'[Automation] PR #{pr_number}: code review changes',
+                    )
+                    await git.push(branch)
+                    logger.info(
+                        f'[Automation] Pushed {commit_hash} to {branch} '
+                        f'for PR #{pr_number}',
+                    )
+                else:
+                    logger.info(
+                        f'[Automation] No changes to push for PR #{pr_number}',
+                    )
+            except Exception:
+                logger.error(
+                    f'[Automation] Git operations failed for PR #{pr_number}:',
+                    exc_info=True,
+                )
+        else:
+            logger.info(
+                f'[Automation] Skipping git ops for PR #{pr_number}: '
+                'sandbox not accessible from this context',
             )
 
-            has_changes = await git.has_changes()
-            if has_changes:
-                commit_hash = await git.commit_all(
-                    f'[Automation] PR #{pr_number}: code review changes',
-                )
-                await git.push(branch)
-                logger.info(
-                    f'[Automation] Pushed {commit_hash} to {branch} '
-                    f'for PR #{pr_number}',
-                )
-            else:
-                logger.info(
-                    f'[Automation] No changes to push for PR #{pr_number}',
-                )
-        except Exception:
-            logger.error(
-                f'[Automation] Git operations failed for PR #{pr_number}:',
-                exc_info=True,
-            )
-
-        # 2. Add PR comment with completion summary
+        # ── 2. Add PR comment with completion summary (GitHub API) ───
         try:
             from .services.github_api_service import GitHubApiService
 

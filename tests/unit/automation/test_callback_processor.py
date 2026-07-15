@@ -131,8 +131,11 @@ async def test_terminal_finished_updates_state(
     assert result.status.value == 'SUCCESS'
     assert callback.status.value == 'COMPLETED'
 
-    # Post-execution should NOT be called without request context
-    mock_post.assert_not_called()
+    # Post-execution IS called even without request context (no guard)
+    mock_post.assert_awaited_once_with(
+        mock_execution_record, conversation_id,
+    )
+    # Pause requires request context
     mock_pause.assert_not_called()
 
     # State should be updated to COMPLETED
@@ -144,36 +147,10 @@ async def test_terminal_finished_updates_state(
 
 
 @pytest.mark.asyncio
-async def test_terminal_error_updates_state(
+async def test_terminal_finished_with_context_runs_post_execution_and_pause(
     processor, conversation_id, callback, mock_execution_record,
 ):
-    """Terminal ERROR updates execution to FAILED."""
-    event = _make_event('execution_status', 'error')
-
-    with patch(
-        'openhands.app_server.automation.callback_processors.ExecutionStore',
-    ) as MockStore:
-        store_instance = MockStore.return_value
-        store_instance.get_execution_by_conversation_id = AsyncMock(
-            return_value=mock_execution_record
-        )
-        store_instance.update_state = AsyncMock()
-
-        result = await processor(conversation_id, callback, event)
-
-    assert result is not None
-    assert result.status.value == 'SUCCESS'
-
-    # Verify FAILED state
-    call_kwargs = store_instance.update_state.call_args.kwargs
-    assert call_kwargs['state'].value == 'FAILED'
-
-
-@pytest.mark.asyncio
-async def test_terminal_finished_with_context_runs_post_execution(
-    processor, conversation_id, callback, mock_execution_record,
-):
-    """With request context, FINISHED triggers post-execution."""
+    """With request context, FINISHED triggers post-execution AND pause."""
     event = _make_event('execution_status', 'finished')
 
     # Inject request context
@@ -205,6 +182,30 @@ async def test_terminal_finished_with_context_runs_post_execution(
     mock_pause.assert_awaited_once_with(conversation_id)
 
 
+@pytest.mark.asyncio
+async def test_terminal_error_updates_state(
+    processor, conversation_id, callback, mock_execution_record,
+):
+    """Terminal ERROR updates execution to FAILED."""
+    event = _make_event('execution_status', 'error')
+
+    with patch(
+        'openhands.app_server.automation.callback_processors.ExecutionStore',
+    ) as MockStore:
+        store_instance = MockStore.return_value
+        store_instance.get_execution_by_conversation_id = AsyncMock(
+            return_value=mock_execution_record
+        )
+        store_instance.update_state = AsyncMock()
+
+        result = await processor(conversation_id, callback, event)
+
+    assert result is not None
+    assert result.status.value == 'SUCCESS'
+
+    # Verify FAILED state
+    call_kwargs = store_instance.update_state.call_args.kwargs
+    assert call_kwargs['state'].value == 'FAILED'
 @pytest.mark.asyncio
 async def test_post_execution_jira_flow(
     processor, conversation_id, mock_execution_record,
