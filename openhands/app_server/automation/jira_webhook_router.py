@@ -751,27 +751,44 @@ async def _restore_archived_conversation(
         repo = conv_info.selected_repository if conv_info else None
         branch = conv_info.selected_branch if conv_info else 'main'
 
+        logger.info(
+            f'[Automation] Restore step 1/6: creating sandbox (repo=%s, branch=%s)',
+            repo, branch,
+        )
+
         # Create a fresh sandbox
         async with (
             get_sandbox_service(request.state, request) as sandbox_service,
             get_httpx_client(request.state, request) as httpx_client,
         ):
+            logger.info('[Automation] Restore step 2/6: start_sandbox()...')
             sandbox = await sandbox_service.start_sandbox()
+            logger.info(
+                '[Automation] Restore step 2/6: sandbox_id=%s, waiting...',
+                sandbox.id,
+            )
             await sandbox_service.wait_for_sandbox_running(
                 sandbox.id, timeout=120, poll_interval=2,
             )
+            logger.info('[Automation] Restore step 2/6: sandbox running')
 
             # Resolve agent server URL
+            logger.info('[Automation] Restore step 3/6: resolving agent URL...')
             agent_url = None
             for eu in sandbox.exposed_urls or []:
                 if eu.name == AGENT_SERVER:
                     agent_url = eu.url
                     break
             if not agent_url:
+                logger.error('[Automation] Restore step 3/6: NO agent URL found!')
                 return False
             agent_url = replace_localhost_hostname_for_docker(agent_url)
+            logger.info(
+                '[Automation] Restore step 3/6: agent_url=%s', agent_url,
+            )
 
             # Restore conversation archive
+            logger.info('[Automation] Restore step 4/6: restoring archive from S3...')
             s3_store = S3FileStore()
             archive_svc = SandboxArchiveService(
                 s3_store=s3_store,
@@ -780,10 +797,14 @@ async def _restore_archived_conversation(
 
             # Clone the repo before restoring conversation (agent needs files)
             if repo:
+                logger.info(
+                    '[Automation] Restore step 4.5/6: cloning %s (branch=%s)...',
+                    repo, branch,
+                )
                 parts = repo.split('/', 1)
                 if len(parts) == 2:
                     owner, repo_name = parts[0], parts[1]
-                    await SandboxArchiveService.clone_repo(
+                    cloned = await SandboxArchiveService.clone_repo(
                         httpx_client=httpx_client,
                         agent_server_url=agent_url,
                         session_api_key=sandbox.session_api_key,
@@ -791,19 +812,33 @@ async def _restore_archived_conversation(
                         repo_name=repo_name,
                         branch=branch,
                     )
+                    logger.info(
+                        '[Automation] Restore step 4.5/6: clone result=%s',
+                        cloned,
+                    )
 
+            logger.info('[Automation] Restore step 4/6: calling restore_into_sandbox...')
             ok = await archive_svc.restore_into_sandbox(
                 agent_server_url=agent_url,
                 session_api_key=sandbox.session_api_key,
                 s3_key=archived.archive_location,
                 conversation_id=conversation_id,
             )
+            logger.info(
+                '[Automation] Restore step 4/6: restore_into_sandbox result=%s',
+                ok,
+            )
             if not ok:
-                # Cleanup
+                logger.error('[Automation] Restore step 4/6: FAILED, cleaning up sandbox')
                 await sandbox_service.delete_sandbox(sandbox.id)
                 return False
 
             # Start the conversation (resume path activates automatically)
+            logger.info(
+                '[Automation] Restore step 5/6: POST /api/conversations '
+                '(conversation_id=%s, max_iterations=%d)',
+                conversation_id, archived.max_iterations or 500,
+            )
             start_req = {
                 'conversation_id': conversation_id,
                 'workspace': {'working_dir': '/workspace/project'},
@@ -815,9 +850,14 @@ async def _restore_archived_conversation(
                 headers={'X-Session-API-Key': sandbox.session_api_key},
                 timeout=120.0,
             )
+            logger.info(
+                '[Automation] Restore step 5/6: POST /api/conversations → %s',
+                resp.status_code,
+            )
             resp.raise_for_status()
 
             # Forward the new comment message
+            logger.info('[Automation] Restore step 6/6: posting comment event...')
             comment = payload.get('comment', {})
             comment_body = (comment.get('body', '') or '').strip()
             user = comment.get('author', {}).get('displayName', 'User')
