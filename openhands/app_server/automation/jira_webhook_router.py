@@ -878,10 +878,20 @@ async def _restore_archived_conversation(
             # exists, and the agent-server would crash trying to reconnect.
             safe_settings = dict(agent_settings)
             safe_settings.pop('mcp_config', None)
+            # Strip empty tools list — it overrides the sandbox defaults
+            # and leaves the agent with only {finish, think, switch_llm}.
+            tools = safe_settings.get('tools')
+            if tools is not None and (isinstance(tools, list) and len(tools) == 0):
+                safe_settings.pop('tools')
             if 'agent' in safe_settings and isinstance(
                 safe_settings['agent'], dict
             ):
                 safe_settings['agent'].pop('mcp_config', None)
+                agent_tools = safe_settings['agent'].get('tools')
+                if agent_tools is not None and (
+                    isinstance(agent_tools, list) and len(agent_tools) == 0
+                ):
+                    safe_settings['agent'].pop('tools')
 
             start_req: dict[str, object] = {
                 'conversation_id': str(conversation_id),
