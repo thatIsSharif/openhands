@@ -703,11 +703,21 @@ async def _restore_archived_pr_conversation(
                 )
                 agent_settings = build_agent_settings_from_env()
 
+            # Strip stale MCP config from agent_settings — the SettingsStore
+            # may contain mcp_config from a previous sandbox that no longer
+            # exists, and the agent-server would crash trying to reconnect.
+            safe_settings = dict(agent_settings)
+            safe_settings.pop('mcp_config', None)
+            if 'agent' in safe_settings and isinstance(
+                safe_settings['agent'], dict
+            ):
+                safe_settings['agent'].pop('mcp_config', None)
+
             start_req: dict[str, object] = {
                 'conversation_id': str(conversation_id),
                 'workspace': {'working_dir': '/workspace/project'},
                 'max_iterations': archived.max_iterations or 500,
-                'agent_settings': agent_settings,
+                'agent_settings': safe_settings,
             }
 
             resp = await httpx_client.post(

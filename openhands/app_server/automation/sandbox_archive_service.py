@@ -260,33 +260,37 @@ class SandboxArchiveService:
                 )
                 bash_resp.raise_for_status()
 
-                # Strip stale MCP config from base_state.json — the
-                # archived conversation had MCP servers running inside the
-                # OLD sandbox container that no longer exists.  If we leave
-                # them in place the agent-server will try to reconnect,
-                # fail with McpError: Connection closed, and crash during
-                # _initialize.
-                strip_mcp_cmd = (
+                # Verify the extract landed where expected and strip stale
+                # MCP config from base_state.json so the agent-server
+                # doesn't try to reconnect to dead MCP servers from the
+                # old sandbox container.
+                verify_cmd = (
                     'python3 -c "'
-                    'import json, pathlib;'
-                    f"p=pathlib.Path('{dest}/base_state.json');"
-                    'd=json.loads(p.read_text());'
-                    "d.pop('mcp_config',None);"
-                    "ag=d.get('agent',{});"
+                    'import json, pathlib, sys;'
+                    f"d=pathlib.Path('{dest}');"
+                    'bs=d/\'base_state.json\';'
+                    'if not bs.exists():'
+                    "  print(f'base_state.json NOT FOUND at {bs}');"
+                    '  sys.exit(1);'
+                    'data=json.loads(bs.read_text());'
+                    "data.pop('mcp_config',None);"
+                    "ag=data.get('agent',{});"
                     "ag.pop('mcp_config',None);"
-                    "d['agent']=ag;"
-                    'p.write_text(json.dumps(d,indent=2))"'
+                    "data['agent']=ag;"
+                    'bs.write_text(json.dumps(data,indent=2));'
+                    "print(f'OK base_state.json at {bs}');"
+                    'print(f\'events_count={len(list(d.glob(\"events/*.json\")))}\')"'
                 )
-                strip_resp = await self._httpx.post(
+                verify_resp = await self._httpx.post(
                     f'{agent_server_url}/api/bash/execute_bash_command',
-                    json={'command': strip_mcp_cmd},
+                    json={'command': verify_cmd},
                     headers=headers,
                     timeout=15.0,
                 )
-                strip_resp.raise_for_status()
+                verify_resp.raise_for_status()
+                verify_out = verify_resp.json().get('stdout', '') or ''
                 logger.info(
-                    '[SandboxArchive] Stripped stale MCP config from '
-                    'base_state.json'
+                    '[SandboxArchive] Restore verify: %s', verify_out.strip()
                 )
 
                 logger.info(
