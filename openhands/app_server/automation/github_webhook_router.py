@@ -670,21 +670,27 @@ async def _restore_archived_pr_conversation(
                 return None
 
             # Start conversation (resume path)
-            # Fetch agent_settings from sandbox so the request passes
-            # Pydantic validation (agent or agent_settings is required).
-            # Resume: ConversationState.create() does state.agent = agent
-            # so agent_settings MUST contain the real API key.  Use
-            # X-Expose-Secrets: plaintext to avoid a redacted value.
-            settings_resp = await httpx_client.get(
-                f'{agent_url}/api/settings',
-                headers={
-                    'X-Session-API-Key': sandbox.session_api_key,
-                    'X-Expose-Secrets': 'plaintext',
-                },
-                timeout=15.0,
+            # Build agent_settings from the app-server's own config so
+            # the LLM API key / base_url are populated (a fresh sandbox
+            # has no settings.json and therefore returns api_key=null
+            # regardless of X-Expose-Secrets).
+            from openhands.app_server.shared import (
+                SettingsStoreImpl,
             )
-            settings_resp.raise_for_status()
-            agent_settings = settings_resp.json()['agent_settings']
+
+            settings_store = await SettingsStoreImpl.get_instance(user_id=None)
+            app_settings = await settings_store.load()
+            if app_settings is not None and app_settings.agent_settings is not None:
+                agent_settings = app_settings.agent_settings.model_dump(
+                    mode='json',
+                    context={'expose_secrets': True},
+                )
+            else:
+                logger.warning(
+                    '[Automation] No app-server settings found; '
+                    'agent may lack LLM configuration'
+                )
+                agent_settings = {}
 
             start_req: dict[str, object] = {
                 'conversation_id': str(conversation_id),

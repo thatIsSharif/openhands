@@ -839,26 +839,30 @@ async def _restore_archived_conversation(
                 conversation_id, archived.max_iterations or 500,
             )
 
-            # Fetch agent_settings from the sandbox so the request passes
-            # Pydantic validation (agent or agent_settings is required).
-            # Resume path: ConversationState.create() does
-            #   state.agent = agent  (i.e. overwrites with request's agent)
-            # so the agent_settings MUST contain the real LLM API key,
-            # not a redacted value.  Use X-Expose-Secrets: plaintext so
-            # the sandbox returns secrets in plaintext.
-            settings_resp = await httpx_client.get(
-                f'{agent_url}/api/settings',
-                headers={
-                    'X-Session-API-Key': sandbox.session_api_key,
-                    'X-Expose-Secrets': 'plaintext',
-                },
-                timeout=15.0,
+            # Build agent_settings from the app-server's own config so
+            # the LLM API key / base_url are populated (a fresh sandbox
+            # has no settings.json and therefore returns api_key=null
+            # regardless of X-Expose-Secrets).
+            from openhands.app_server.shared import (
+                SettingsStoreImpl,
             )
-            settings_resp.raise_for_status()
-            agent_settings = settings_resp.json()['agent_settings']
+
+            settings_store = await SettingsStoreImpl.get_instance(user_id=None)
+            app_settings = await settings_store.load()
+            if app_settings is not None and app_settings.agent_settings is not None:
+                agent_settings = app_settings.agent_settings.model_dump(
+                    mode='json',
+                    context={'expose_secrets': True},
+                )
+            else:
+                logger.warning(
+                    '[Automation] No app-server settings found; '
+                    'agent may lack LLM configuration'
+                )
+                agent_settings = {}
             logger.info(
-                '[Automation] Restore step 5/6: fetched agent_settings '
-                'from sandbox'
+                '[Automation] Restore step 5/6: built agent_settings '
+                'from app-server config'
             )
 
             start_req: dict[str, object] = {

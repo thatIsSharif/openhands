@@ -203,20 +203,44 @@ class SandboxArchiveService:
                 )
                 upload_resp.raise_for_status()
 
-                # Query the sandbox CWD to determine where the agent server
-                # stores its conversation data (config.conversations_path is
-                # relative to the server's working directory).
+                # Determine the agent server process CWD by reading
+                # /proc/<pid>/cwd.  ``pwd`` from the bash API gives the
+                # bash-session CWD, NOT the agent-server CWD, and the
+                # config.conversations_path is resolved relative to the
+                # *agent-server* CWD (``Path('workspace/conversations')``
+                # becomes ``/workspace/conversations`` when the server runs
+                # from ``/``).
+                cwd_cmd = (
+                    'python3 -c "'
+                    'import os;'
+                    "for e in os.listdir('/proc'):"
+                    '  if e.isdigit():'
+                    '    try:'
+                    "      cl = open(f'/proc/{e}/cmdline').read()"
+                    "      if 'python' in cl and ('agent_server' in cl"
+                    "                         or 'uvicorn' in cl):"
+                    "        print(os.readlink(f'/proc/{e}/cwd')); break"
+                    '    except: pass'
+                    '"'
+                )
                 cwd_resp = await self._httpx.post(
                     f'{agent_server_url}/api/bash/execute_bash_command',
-                    json={'command': 'pwd'},
+                    json={'command': cwd_cmd},
                     headers=headers,
                     timeout=10.0,
                 )
                 cwd_resp.raise_for_status()
-                sandbox_cwd = (cwd_resp.json().get('stdout') or '').strip()
+                cwd_output = cwd_resp.json().get('stdout', '') or ''
+                agent_cwd = cwd_output.strip()
+                if not agent_cwd:
+                    logger.warning(
+                        '[SandboxArchive] Could not detect agent-server CWD, '
+                        'falling back to /'
+                    )
+                    agent_cwd = '/'
 
                 # Extract into conversations dir
-                dest = f'{sandbox_cwd}/{conversations_path}/{cid_hex}'
+                dest = f'{agent_cwd}/{conversations_path}/{cid_hex}'
                 # Use python3 zipfile (unzip is not in the sandbox image)
                 extract_cmd = (
                     'python3 -c "'
