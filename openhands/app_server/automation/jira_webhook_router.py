@@ -28,8 +28,8 @@ from openhands.app_server.automation.execution_service import (
 )
 from openhands.app_server.automation.execution_store import ExecutionStore
 from openhands.app_server.automation.input_sanitizer import (
+    build_rejection_message,
     has_dangerous_patterns,
-    build_rejection_message
 )
 from openhands.app_server.automation.jira_automation_service import (
     JiraAutomationService,
@@ -303,10 +303,6 @@ async def _handle_comment_created(
 
             agent_server_url = replace_localhost_hostname_for_docker(agent_server_url)
 
-            # Build the token-usage endpoint from the request
-            base_url = str(request.base_url).rstrip('/')
-            token_usage_url = f'{base_url}/api/v1/jira/start/token-usage'
-
             # ── Input sanitization (Layer 1) ────────────────────────
             is_dangerous, labels = has_dangerous_patterns(
                 comment_body, field_name='jira_existing_comment'
@@ -325,7 +321,6 @@ async def _handle_comment_created(
                 'jira_existing_conversation.j2',
                 issue_key=issue_key,
                 comment_body=comment_body,
-                token_usage_url=token_usage_url,
             )
 
             response = await httpx_client.post(

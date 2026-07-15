@@ -252,10 +252,6 @@ class GitHubAutomationService:
             execution_id, ExecutionState.QUEUED
         )
 
-        # Build the comment endpoint URL from the incoming request
-        base_url = str(request.base_url).rstrip('/')
-        comment_endpoint = f'{base_url}/api/v1/git/github/webhook/comment'
-
         # ── Input sanitization (Layer 1) ────────────────────────────
         # Check the review comment (the main user-controlled text field)
         is_dangerous, labels = has_dangerous_patterns(
@@ -289,7 +285,6 @@ class GitHubAutomationService:
             reviewer=reviewer,
             review_comment=review_comment,
             branch=branch,
-            comment_endpoint=comment_endpoint,
         )
 
         # Create NEW OpenHands conversation with repository attached
@@ -406,10 +401,6 @@ class GitHubAutomationService:
             execution_id, ExecutionState.QUEUED
         )
 
-        # Build the comment endpoint URL from the incoming request
-        base_url = str(request.base_url).rstrip('/')
-        comment_endpoint = f'{base_url}/api/v1/git/github/webhook/comment'
-
         # ── Input sanitization (Layer 1) ────────────────────────────
         # Check the review comment (the main user-controlled text field)
         is_dangerous, labels = has_dangerous_patterns(
@@ -452,7 +443,6 @@ class GitHubAutomationService:
             review_state=review_state,
             review_comment=review_comment,
             branch=branch,
-            comment_endpoint=comment_endpoint,
         )
 
         # Create NEW OpenHands conversation with repository attached

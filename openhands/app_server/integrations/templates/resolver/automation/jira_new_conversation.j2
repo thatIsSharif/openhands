@@ -1,129 +1,66 @@
-{# Jira Multi-Repository Automation Prompt #}
+{# Jira Automation Prompt - Pure Coding Task #}
 
-You are working on {{ repo_label }} repository for Jira issue {{ issue_key }}.
+# {{ title }}
 
-Issue Key: {{ issue_key }}
-Title: {{ title }}
-Type: {{ issue_type }} | Priority: {{ priority }}
+**Issue**: {{ issue_key }}
+**Type**: {{ issue_type }} | **Priority**: {{ priority }}
 
-Description:
+## Description
+
 {{ description }}
 
-Repository: {{ repository }}
-Repository Label: {{ repo_label }}
-Default Branch: {{ default_branch }}
-Working Branch: {{ branch }}
+## Working Context
+
+- **Repository**: {{ repository }} ({{ repo_label }})
+- **Working Branch**: {{ branch }} (already created and checked out)
+- **Default Branch**: {{ default_branch }}
+
+This repository is cloned at `/workspace/{{ repo_label or repository.split('/')[-1] }}`.
+The working branch `{{ branch }}` is already checked out. All git operations,
+PR creation, and Jira updates are handled automatically.
 
 {% if other_repos %}
-## Other Repositories Available (Clone if needed)
+## Related Repositories
+
+This issue may span multiple repositories. The following repos are also
+available:
 
 {% for repo in other_repos %}
-### {{ repo.label | title }} Repository
-- **Repository**: {{ repo.owner }}/{{ repo.repository }}
-- **Working Branch**: {{ repo.branch }}
-- **Label**: {{ repo.label }}
-
-To clone this repository when needed, run:
-```
-git clone --depth=1 https://github.com/{{ repo.owner }}/{{ repo.repository }}.git /workspace/{{ repo.label }}
-```
-Base your work off `main`. If `main` does not exist, use `master`.
+- **{{ repo.owner }}/{{ repo.repository }}** ({{ repo.label }})
 {% endfor %}
+
+Only make changes in this repository ({{ repository }}) unless you are
+absolutely certain changes are needed elsewhere.
 {% endif %}
 
-## Gate Rule (MUST READ BEFORE ANY WORK)
+## Gate Rule
 
 This repository is labeled "{{ repo_label }}".
 
-Analyze the Jira issue thoroughly — read the title, description, scope, and
-acceptance criteria. Proceed only if you genuinely believe changes are
-required in **this** repository ({{ repository }}).
-
-Check the Jira issue description for phrases like:
+Analyze the Jira issue thoroughly. Proceed only if changes are required in
+**this** repository ({{ repository }}). Check the description for phrases like:
 - "No {{ repo_label }} changes required"
-- "{{ repo_label }} N/A"
+- "{{ repo_label }} N/A" or "{{ repo_label }} changes: N/A"
 - "Out of Scope: {{ repo_label }} changes"
-- "{{ repo_label }} changes" listed under "Out of Scope"
-- "{{ repo_label }} changes: N/A"
 
 If the issue explicitly excludes {{ repo_label }} work:
    → STOP. Do NOT make any changes.
-   → Post a comment: "No changes needed in {{ repository }} ({{ repo_label }})."
-   → Your job is done for this repository.
+   → Simply indicate that no changes are needed.
 
 If the issue requires {{ repo_label }} changes:
    → Proceed with implementation below.
 
-## Requirements
+## Task
 
-{% if other_repos %}
-### Multi-Repository Workflow
+Implement the changes described in this Jira issue.
 
-This project has multiple repositories:
-1. **{{ repository }}** ({{ repo_label }}) - This repo is already cloned
-{% for repo in other_repos %}
-{{ loop.index + 1 }}. **{{ repo.owner }}/{{ repo.repository }}** ({{ repo.label }}) - Clone if needed
-{% endfor %}
+1. Read the issue description and understand the requirements
+2. Make the necessary code changes
+3. Run tests to verify your changes
 
-After completing work on this repository ({{ repo_label }}):
+## Important
 
-{% for repo in other_repos %}
-#### For {{ repo.label | title }} Repository ({{ repo.owner }}/{{ repo.repository }})
-When working on this repository, apply the Gate Rule:
-- Check for "No {{ repo.label }} changes required"
-- Check for "{{ repo.label }} N/A" or "{{ repo.label }} changes: N/A"
-- Only proceed if changes are needed for {{ repo.label }}
-{% endfor %}
-
-General workflow:
-1. Analyze if changes are needed in any of the other repositories
-2. For each repository that needs changes:
-   - Clone the repository (see commands above)
-   - Apply the Gate Rule for that repository
-   - Base work off `main` (fallback to `master` if `main` doesn't exist)
-   - Create a branch using the Working Branch name specified for that repository
-   - Make the necessary changes
-   - Create a commit and PR
-3. If no changes are needed in a repository, skip it
-
-{% endif %}
-
-1. Analyze the Jira issue and understand the requested changes.
-2. Create a branch named "{{ branch }}" from "{{ default_branch }}".
-3. Implement the required changes following the project coding standards.
-4. Run relevant tests, linting, or validation commands whenever applicable.
-5. Commit your changes with clear commit messages referencing the Jira issue key.
-6. Create a pull request targeting "{{ default_branch }}".
-7. Include a clear description of the implementation in the pull request.
-8. After ALL pull requests are created across ALL repositories,
-   post a single comment on the Jira issue by sending a POST request to:
-   POST {{ comment_endpoint }}
-   {
-     "issue_key": "{{ issue_key }}",
-     "body": "Summary of changes implemented\nKey files: ...\nPRs: <url1>, <url2>, ..."
-   }
-9. After posting the summary comment, also post the token usage by sending
-   a POST request to:
-   POST {{ token_usage_endpoint }}
-   {
-     "issue_key": "{{ issue_key }}",
-     "body": ""
-   }
-   (The endpoint will automatically fetch metrics and create or update
-   a single token-usage comment per issue, identified by the
-   "*OpenHands Automation Complete*" marker.)
-
-{% if other_repos %}
-## Important Notes
-- Always check if other repositories also need changes
-- Analyze the Jira ticket thoroughly
-- Clone repositories and verify before skipping them
-- Create separate PRs for each repository that has changes
-- Post a single Jira comment at the very end with links to ALL PRs created
-- If a repository needs no changes, skip it
-{% endif %}
-
-## Final Step (Always Required)
-After completing ALL work and posting the summary comment, always call the
-token-usage endpoint (step 9 above) so cost and token metrics are recorded
-on the Jira issue.
+- Do NOT perform any git operations (branch, commit, push, PR creation)
+- Do NOT call any Jira or GitHub APIs
+- Do NOT post comments or token usage reports
+- These are all handled automatically by the automation platform

@@ -26,9 +26,9 @@ from .correlation import build_log_context
 from .execution_models import ExecutionState, SourceType
 from .execution_service import ExecutionService
 from .input_sanitizer import (
+    build_rejection_message,
     has_dangerous_patterns,
     validate_jira_issue_key,
-    build_rejection_message
 )
 from .openhands_client import OpenHandsClient
 from .prompt_renderer import render_prompt
@@ -366,11 +366,6 @@ class JiraAutomationService:
             execution_id, ExecutionState.QUEUED
         )
 
-        # Build the full endpoint URLs from the incoming request
-        base_url = str(request.base_url).rstrip('/')
-        comment_endpoint = f'{base_url}/api/v1/jira/start/comment'
-        token_usage_endpoint = f'{base_url}/api/v1/jira/start/token-usage'
-
         # ── Input sanitization (Layer 1) ────────────────────────────
         # Check all user-controlled text fields for dangerous patterns
         validated_issue_key = (
@@ -446,8 +441,6 @@ class JiraAutomationService:
             repo_label=primary_label,
             default_branch=default_branch,
             branch=branch,
-            comment_endpoint=comment_endpoint,
-            token_usage_endpoint=token_usage_endpoint,
             other_repos=other_repos_info,
         )
 
