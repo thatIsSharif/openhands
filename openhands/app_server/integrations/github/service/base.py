@@ -159,14 +159,15 @@ class GitHubMixinBase(BaseGitService, HTTPClient):
     async def get_user_emails(self) -> list[dict]:
         """Fetch the authenticated user's email addresses from GitHub.
 
-        NOTE: This endpoint requires a user PAT.  With GitHub App
-        installation tokens it will fail with 403.  The calling code
-        in ``provider.py`` handles this gracefully by falling through
-        to other configured providers.
+        NOTE: With GitHub App installation tokens this endpoint will
+        return 403. Returns an empty list so callers don't break.
         """
         url = f'{self.BASE_URL}/user/emails'
-        response, _ = await self._make_request(url)
-        return response
+        try:
+            response, _ = await self._make_request(url)
+            return response
+        except Exception:
+            return []
 
     async def verify_access(self) -> bool:
         url = f'{self.BASE_URL}'
@@ -174,15 +175,45 @@ class GitHubMixinBase(BaseGitService, HTTPClient):
         return True
 
     async def get_user(self):
-        """Fetch the authenticated GitHub user.
+        """Fetch the authenticated GitHub user's information.
 
-        NOTE: This endpoint requires a user PAT.  With GitHub App
-        installation tokens it will fail with 403.  The calling code
-        in ``provider.py`` handles this gracefully by falling through
-        to other configured providers.
+        With GitHub App installation tokens, GET /user returns 403
+        (installation tokens cannot authenticate user-scoped endpoints).
+        When that happens, returns a minimal ``User`` using the owner
+        from ``selected_repository`` if available, so callers in
+        ``features.py`` and ``repos.py`` can still derive a login name
+        for GraphQL queries and search filters.
+
+        The ``provider.py`` flow also catches the error and falls
+        through to other configured providers (GitLab, Bitbucket, etc.).
         """
         url = f'{self.BASE_URL}/user'
-        response, _ = await self._make_request(url)
+        try:
+            response, _ = await self._make_request(url)
+        except Exception:
+            logger.warning(
+                'github:get_user:failed_with_installation_token',
+                exc_info=True,
+            )
+            # Return a minimal user derived from the selected repository
+            if self.selected_repository:
+                login, _, _ = self.selected_repository.partition('/')
+                return User(
+                    id='',
+                    login=login,
+                    avatar_url='',
+                    company='',
+                    name=login,
+                    email=None,
+                )
+            return User(
+                id='',
+                login='',
+                avatar_url='',
+                company='',
+                name='',
+                email=None,
+            )
 
         email = response.get('email')
         if email is None:
