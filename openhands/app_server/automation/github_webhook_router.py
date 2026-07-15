@@ -672,10 +672,15 @@ async def _restore_archived_pr_conversation(
             # Start conversation (resume path)
             # Fetch agent_settings from sandbox so the request passes
             # Pydantic validation (agent or agent_settings is required).
-            # PersistedSettings always has a default agent_settings.
+            # Resume: ConversationState.create() does state.agent = agent
+            # so agent_settings MUST contain the real API key.  Use
+            # X-Expose-Secrets: plaintext to avoid a redacted value.
             settings_resp = await httpx_client.get(
                 f'{agent_url}/api/settings',
-                headers={'X-Session-API-Key': sandbox.session_api_key},
+                headers={
+                    'X-Session-API-Key': sandbox.session_api_key,
+                    'X-Expose-Secrets': 'plaintext',
+                },
                 timeout=15.0,
             )
             settings_resp.raise_for_status()

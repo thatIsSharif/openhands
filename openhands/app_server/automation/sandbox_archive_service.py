@@ -203,8 +203,20 @@ class SandboxArchiveService:
                 )
                 upload_resp.raise_for_status()
 
+                # Query the sandbox CWD to determine where the agent server
+                # stores its conversation data (config.conversations_path is
+                # relative to the server's working directory).
+                cwd_resp = await self._httpx.post(
+                    f'{agent_server_url}/api/bash/execute_bash_command',
+                    json={'command': 'pwd'},
+                    headers=headers,
+                    timeout=10.0,
+                )
+                cwd_resp.raise_for_status()
+                sandbox_cwd = (cwd_resp.json().get('stdout') or '').strip()
+
                 # Extract into conversations dir
-                dest = f'/home/openhands/{conversations_path}/{cid_hex}'
+                dest = f'{sandbox_cwd}/{conversations_path}/{cid_hex}'
                 # Use python3 zipfile (unzip is not in the sandbox image)
                 extract_cmd = (
                     'python3 -c "'
