@@ -23,6 +23,9 @@ class GitHubMixinBase(BaseGitService, HTTPClient):
     BASE_URL: str
     GRAPHQL_URL: str
 
+    # Optional repository context for GitHub App token resolution.
+    selected_repository: str | None = None
+
     @staticmethod
     def _resolve_primary_email(emails: list[dict]) -> str | None:
         """Find the primary verified email from a list of GitHub email objects.
@@ -37,19 +40,51 @@ class GitHubMixinBase(BaseGitService, HTTPClient):
         return None
 
     async def _get_headers(self) -> dict:
-        """Retrieve the GH Token from settings store to construct the headers."""
-        if not self.token:
-            latest_token = await self.get_latest_token()
-            if latest_token:
-                self.token = latest_token
+        """Retrieve a GitHub App installation token for headers.
+
+        Uses GitHub App exclusively.  Raises if GitHub App is not
+        configured — there is no PAT fallback.
+        """
+        gh_app_token = await self._resolve_github_app_token()
+        if not gh_app_token:
+            from openhands.app_server.utils.github_app import (
+                GitHubAppNotConfiguredError,
+            )
+
+            raise GitHubAppNotConfiguredError(
+                'GitHub App not configured. '
+                'Set GITHUB_APP_ID, GITHUB_APP_PRIVATE_KEY, '
+                'and GITHUB_APP_INSTALLATION_ID.'
+            )
 
         return {
-            'Authorization': f'Bearer {self.token.get_secret_value() if self.token else ""}',
+            'Authorization': f'Bearer {gh_app_token}',
             'Accept': 'application/vnd.github.v3+json',
         }
 
+    async def _resolve_github_app_token(self) -> str | None:
+        """Resolve a GitHub App installation token.
+
+        Reads ``GITHUB_APP_INSTALLATION_ID`` from the environment.
+
+        Returns None if GitHub App is not configured.
+        """
+        from openhands.app_server.utils.github_app import (
+            GitHubAppTokenManager,
+        )
+
+        if not GitHubAppTokenManager.is_available():
+            return None
+
+        try:
+            return GitHubAppTokenManager.get_token_for_installation()
+        except Exception:
+            logger.exception('Failed to resolve GitHub App token')
+            return None
+
     async def get_latest_token(self) -> SecretStr | None:  # type: ignore[override]
-        return self.token
+        """Satisfy the abstract method — PAT-based refresh is not supported."""
+        return None
 
     async def _make_request(
         self,
@@ -72,7 +107,7 @@ class GitHubMixinBase(BaseGitService, HTTPClient):
 
                 # Handle token refresh if needed
                 if self.refresh and self._has_token_expired(response.status_code):
-                    await self.get_latest_token()
+                    # Re-resolve a fresh GitHub App installation token
                     github_headers = await self._get_headers()
                     response = await self.execute_request(
                         client=client,
@@ -124,13 +159,15 @@ class GitHubMixinBase(BaseGitService, HTTPClient):
     async def get_user_emails(self) -> list[dict]:
         """Fetch the authenticated user's email addresses from GitHub.
 
-        Calls GET /user/emails which returns a list of email objects, each
-        containing 'email', 'primary', 'verified', and 'visibility' fields.
-        Requires the user:email OAuth scope.
+        NOTE: With GitHub App installation tokens this endpoint will
+        return 403. Returns an empty list so callers don't break.
         """
         url = f'{self.BASE_URL}/user/emails'
-        response, _ = await self._make_request(url)
-        return response
+        try:
+            response, _ = await self._make_request(url)
+            return response
+        except Exception:
+            return []
 
     async def verify_access(self) -> bool:
         url = f'{self.BASE_URL}'
@@ -138,8 +175,45 @@ class GitHubMixinBase(BaseGitService, HTTPClient):
         return True
 
     async def get_user(self):
+        """Fetch the authenticated GitHub user's information.
+
+        With GitHub App installation tokens, GET /user returns 403
+        (installation tokens cannot authenticate user-scoped endpoints).
+        When that happens, returns a minimal ``User`` using the owner
+        from ``selected_repository`` if available, so callers in
+        ``features.py`` and ``repos.py`` can still derive a login name
+        for GraphQL queries and search filters.
+
+        The ``provider.py`` flow also catches the error and falls
+        through to other configured providers (GitLab, Bitbucket, etc.).
+        """
         url = f'{self.BASE_URL}/user'
-        response, _ = await self._make_request(url)
+        try:
+            response, _ = await self._make_request(url)
+        except Exception:
+            logger.warning(
+                'github:get_user:failed_with_installation_token',
+                exc_info=True,
+            )
+            # Return a minimal user derived from the selected repository
+            if self.selected_repository:
+                login, _, _ = self.selected_repository.partition('/')
+                return User(
+                    id='',
+                    login=login,
+                    avatar_url='',
+                    company='',
+                    name=login,
+                    email=None,
+                )
+            return User(
+                id='',
+                login='',
+                avatar_url='',
+                company='',
+                name='',
+                email=None,
+            )
 
         email = response.get('email')
         if email is None:

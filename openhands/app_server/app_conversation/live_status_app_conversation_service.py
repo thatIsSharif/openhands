@@ -958,14 +958,27 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
 
         return f'{working_dir}/{config_dir}/PLAN.md'
 
-    async def _setup_secrets_for_git_providers(self, user: UserInfo) -> dict:
+    async def _setup_secrets_for_git_providers(
+        self,
+        user: UserInfo,
+        selected_repository: str | None = None,
+    ) -> dict:
         """Set up secrets for all git provider authentication.
 
+        For GitHub, injects a freshly-minted GitHub App installation
+        token as ``GITHUB_TOKEN``.  If GitHub App is not configured,
+        no GitHub token is injected — there is no PAT fallback.
+
+        Other providers (GitLab, Bitbucket, etc.) use the existing
+        LookupSecret or static-token patterns unchanged.
+
         Args:
-            user: User information containing authentication details
+            user: User information containing authentication details.
+            selected_repository: Optional repository name (``"owner/repo"``)
+                for resolving the correct GitHub App installation.
 
         Returns:
-            Dictionary of secrets for the conversation
+            Dictionary of secrets for the conversation.
         """
         secrets = await self.user_context.get_secrets()
 
@@ -985,8 +998,23 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
             secret_name = f'{provider_type.name}_TOKEN'
             description = f'{provider_type.name} authentication token'
 
+            # ── GitHub App injection ─────────────────────────────────
+            # Inject a fresh installation token for GITHUB_TOKEN.
+            # No PAT fallback — if the GitHub App is not configured,
+            # the GitHub provider is simply skipped.
+            if provider_type == ProviderType.GITHUB:
+                gh_app_token = await self._resolve_github_app_token(
+                    selected_repository,
+                )
+                if gh_app_token:
+                    secrets[secret_name] = StaticSecret(
+                        value=SecretStr(gh_app_token),
+                        description=description,
+                    )
+                continue
+
+            # ── Other providers (GitLab, Bitbucket, etc.) ──────────
             if self.web_url:
-                # Create an access token for web-based authentication
                 access_token = self.jwt_service.create_jws_token(
                     payload={
                         'user_id': user.id,
@@ -1002,14 +1030,47 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
                     description=description,
                 )
             else:
-                # Use static token for environments without web URL access
-                static_token = await self.user_context.get_latest_token(provider_type)
+                static_token = await self.user_context.get_latest_token(
+                    provider_type
+                )
                 if static_token:
                     secrets[secret_name] = StaticSecret(
-                        value=SecretStr(static_token), description=description
+                        value=SecretStr(static_token),
+                        description=description,
                     )
 
         return secrets
+
+    async def _resolve_github_app_token(
+        self,
+        selected_repository: str | None = None,
+    ) -> str | None:
+        """Resolve a GitHub App installation token, if configured.
+
+        Reads ``GITHUB_APP_INSTALLATION_ID`` from the environment.
+        The ``selected_repository`` parameter is accepted for interface
+        compatibility but is not used — all repos share the same
+        installation in a single-org setup.
+
+        Returns:
+            A fresh installation token, or None if GitHub App is
+            not configured.
+        """
+        from openhands.app_server.utils.github_app import (
+            GitHubAppTokenManager,
+        )
+
+        if not GitHubAppTokenManager.is_available():
+            return None
+
+        try:
+            return GitHubAppTokenManager.get_token_for_installation()
+        except Exception:
+            _logger.exception(
+                'Failed to resolve GitHub App token for repository=%s',
+                selected_repository,
+            )
+            return None
 
     def _configure_llm(self, user: UserInfo, llm_model: str | None) -> LLM:
         """Configure LLM settings.
@@ -1386,8 +1447,13 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
         workspace = LocalWorkspace(working_dir=project_dir)
 
         # --- secrets --------------------------------------------------------
-        # Start with secrets from git providers and database
-        secrets = await self._setup_secrets_for_git_providers(user)
+        # Start with secrets from git providers and database.
+        # Pass selected_repository so that GitHub App tokens can be
+        # resolved for the correct installation.
+        secrets = await self._setup_secrets_for_git_providers(
+            user,
+            selected_repository=selected_repository,
+        )
 
         # Merge API-provided secrets (they take precedence over existing ones)
         if api_secrets:
