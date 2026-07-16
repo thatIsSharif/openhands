@@ -15,6 +15,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import re
+import traceback
 from dataclasses import dataclass
 
 from openhands.app_server.utils.jira import (
@@ -190,8 +191,6 @@ async def _update_jira_issue_status(
     This is a best-effort operation: failures are logged but do
     not block the automation flow.
     """
-    import traceback
-
     try:
         # Transition issue to In Progress
         result = mark_issue_in_progress(issue_key)
@@ -252,10 +251,14 @@ class JiraAutomationService:
     1. Verify webhook signature
     2. Compute event ID for idempotency
     3. Extract issue data and repository from issue payload
-    4. Create execution record
-    5. Generate branch name
-    6. Create OpenHands conversation with backend repo
-    7. Secondary repos provided in prompt for manual cloning if needed
+    4. Run complexity & task-type analysis (lightweight LLM call)
+    5. Select primary repo based on task type:
+       - frontend → pre-clone frontend repo
+       - backend/hybrid/unknown → pre-clone backend repo (default)
+    6. Create execution record
+    7. Generate branch name
+    8. Create OpenHands conversation with the selected primary repo
+    9. Secondary repos provided in prompt for manual cloning if needed
     """
 
     execution_service: ExecutionService
@@ -269,13 +272,10 @@ class JiraAutomationService:
     ) -> dict:
         """Process a jira:issue_created webhook event.
 
-        Repository selection:
-        - Backend repo is ALWAYS attached as primary
-        - Frontend repo info is included in prompt for manual cloning if needed
-        - Agent reads the ticket and decides what to do:
-          * Backend only → make changes, raise PR
-          * Frontend only → clone frontend manually, make changes, raise PR
-          * Both → make changes in both, raise PRs for both
+        Repository selection (by task type analysis):
+        - frontend → frontend repo is pre-cloned as primary
+        - backend / hybrid / unknown → backend repo is pre-cloned as primary
+        - All other repos are included in the prompt for manual cloning
 
         Returns a dict with execution_id and status for the webhook response.
         """
@@ -344,33 +344,75 @@ class JiraAutomationService:
             ),
         )
 
-        # ── Determine primary repository ────────────────────────────
-        # Backend is always the primary (attached)
-        # All other repos are passed to the prompt for potential cloning
+        # ── Complexity & Task Type Analysis ──────────────────────────
+        # Always run the lightweight LLM call to classify complexity and
+        # task type (backend/frontend/hybrid). On failure, defaults to
+        # backend primary (existing behaviour).
+        task_type: str | None = None
+        complexity: str | None = None
+        llm_model: str | None = None
+
+        analyzer = ComplexityAnalyzer.from_env()
+        result = await analyzer.analyze(issue_data)
+        if result:
+            complexity = result.complexity
+            task_type = result.task_type
+            logger.info(
+                '[Automation] Jira %s complexity=%s task_type=%s reasoning=%s',
+                issue_key,
+                complexity,
+                task_type or 'unknown',
+                result.reasoning,
+            )
+
+            # Model routing (only if router env vars are configured)
+            router = ComplexityRouter.from_env()
+            if router.is_enabled:
+                llm_model = router.resolve(complexity)
+        else:
+            logger.warning(
+                '[Automation] Complexity analysis failed for %s, '
+                'falling back to backend defaults',
+                issue_key,
+            )
+            # task_type stays None → backend primary (existing behaviour)
+
+        # ── Determine primary repository based on task type ──────────
         backend_repo = None
+        frontend_repo = None
         other_repos = []
 
         for repo in repo_records:
-            repo_label = getattr(repo, 'label', None) or 'default'
-            if repo_label.lower() == 'backend' or repo_label.lower() == 'default':
+            repo_label = getattr(repo, 'label', None) or ''
+            label_lower = repo_label.lower()
+            if label_lower in ('backend', 'default'):
                 if not backend_repo:
                     backend_repo = repo
+                else:
+                    other_repos.append(repo)
+            elif label_lower == 'frontend':
+                if not frontend_repo:
+                    frontend_repo = repo
                 else:
                     other_repos.append(repo)
             else:
                 other_repos.append(repo)
 
-        # Fallback: if no backend label, use first as primary
+        # Fallback: if no backend label, use first record as backend
         if not backend_repo and repo_records:
             backend_repo = repo_records[0]
-            other_repos = repo_records[1:]
-        elif backend_repo and backend_repo not in other_repos:
-            # Ensure backend is not in other_repos
-            other_repos = [r for r in other_repos if r != backend_repo]
+            other_repos = [r for r in repo_records[1:] if r != backend_repo]
 
-        if not backend_repo:
+        # Pick primary repo based on task_type analysis
+        if task_type == 'frontend' and frontend_repo:
+            primary_repo = frontend_repo
+        else:
+            # Default: backend (for None, 'backend', 'hybrid', unknown)
+            primary_repo = backend_repo
+
+        if not primary_repo:
             logger.error(
-                f'[Automation] Jira webhook: no backend repo found for '
+                '[Automation] Jira webhook: no suitable primary repo for '
                 f'project {project_key} (issue {issue_key})',
                 extra=build_log_context(
                     execution_id='',
@@ -380,16 +422,18 @@ class JiraAutomationService:
             return {
                 'status': 'failed',
                 'issue_key': issue_key,
-                'error': 'No backend repository found for project',
+                'error': 'No suitable repository found for project',
             }
 
-        primary_repository = f'{backend_repo.owner}/{backend_repo.repository}'
-        primary_label = getattr(backend_repo, 'label', None) or 'default'
-        default_branch = getattr(backend_repo, 'default_branch', None) or 'main'
+        primary_repository = f'{primary_repo.owner}/{primary_repo.repository}'
+        primary_label = getattr(primary_repo, 'label', None) or 'default'
+        default_branch = getattr(primary_repo, 'default_branch', None) or 'main'
 
-        # Build list of all other repos (for cloning if needed)
+        # Build list of all other repos (excluding primary)
         other_repos_info = []
-        for repo in other_repos:
+        for repo in repo_records:
+            if repo == primary_repo:
+                continue
             repo_info = {
                 'owner': repo.owner,
                 'repository': repo.repository,
@@ -398,7 +442,8 @@ class JiraAutomationService:
             }
             other_repos_info.append(repo_info)
             logger.info(
-                f'[Automation] Additional repo for {issue_key}: {repo.owner}/{repo.repository} ({repo_info["label"]})',
+                f'[Automation] Additional repo for {issue_key}: '
+                f'{repo.owner}/{repo.repository} ({repo_info["label"]})',
                 extra=build_log_context(
                     execution_id='',
                     jira_issue_key=issue_key,
@@ -409,7 +454,9 @@ class JiraAutomationService:
         event_id = compute_jira_event_id(payload)
 
         # Generate branch name
-        branch = generate_jira_branch_name(issue_key, issue_data['issue_type'], summary)
+        branch = generate_jira_branch_name(
+            issue_key, issue_data['issue_type'], summary
+        )
 
         # Create execution record with primary repository info
         execution_record, is_new = await self.execution_service.create_execution(
@@ -479,28 +526,6 @@ class JiraAutomationService:
                     'reason': f'Issue contains dangerous patterns in {field_name}',
                 }
 
-        # ── Complexity-based model routing ──────────────────────────
-        llm_model: str | None = None
-
-        router = ComplexityRouter.from_env()
-        if router.is_enabled:
-            analyzer = ComplexityAnalyzer.from_env()
-            result = await analyzer.analyze(issue_data)
-            if result:
-                logger.info(
-                    '[Automation] Jira %s complexity: %s (%s)',
-                    issue_key,
-                    result.complexity,
-                    result.reasoning,
-                )
-                llm_model = router.resolve(result.complexity)
-            else:
-                logger.warning(
-                    '[Automation] Complexity analysis failed for %s, '
-                    'using default model',
-                    issue_key,
-                )
-
         # Build prompt from template with full context
         # Include all other repos for potential cloning
         prompt = render_prompt(
@@ -515,12 +540,13 @@ class JiraAutomationService:
             repo_label=primary_label,
             default_branch=default_branch,
             branch=branch,
+            task_type=task_type or 'backend',
             comment_endpoint=comment_endpoint,
             token_usage_endpoint=token_usage_endpoint,
             other_repos=other_repos_info,
         )
 
-        # Create OpenHands conversation with primary (backend) repository
+        # Create OpenHands conversation with primary repository
         conversation_id = await self.openhands_client.create_conversation(
             state=state,
             request=request,

@@ -324,15 +324,13 @@ class TestComputeJiraEventIdWithRepo:
 
 
 
-class TestProcessIssueCreatedMultiRepo:
-    """Tests for the multi-repo flow in JiraAutomationService (two-phase)."""
+class TestProcessIssueCreated:
+    """Tests for the single-execution flow in JiraAutomationService."""
 
     @pytest.mark.asyncio
-    async def test_multi_repo_parallel_execution_then_sequential_conversations(self):
-        """Phase 1 (parallel): execution creation for each repo.
-        Phase 2 (sequential): conversation creation one at a time.
-        """
-        from unittest.mock import AsyncMock, MagicMock
+    async def test_multi_repo_backend_primary(self):
+        """With backend+frontend repos, backend is primary (default)."""
+        from unittest.mock import AsyncMock, MagicMock, patch
 
         from openhands.app_server.automation.execution_models import (
             JiraProjectRepositoryRecord,
@@ -374,88 +372,355 @@ class TestProcessIssueCreatedMultiRepo:
             default_branch='main', label='frontend',
         )
 
-        mock_store = AsyncMock()
-        mock_store.get_jira_project_repos_by_project_key = AsyncMock(
-            return_value=[repo_backend, repo_frontend]
-        )
+        with patch(
+            'openhands.app_server.automation.jira_automation_service.ComplexityAnalyzer.from_env'
+        ) as mock_from_env:
+            mock_analyzer = MagicMock()
+            mock_analyzer.analyze = AsyncMock(
+                return_value=MagicMock(
+                    complexity='medium', task_type='backend', reasoning='test'
+                )
+            )
+            mock_from_env.return_value = mock_analyzer
 
-        exec_record_1 = MagicMock(execution_id='exec-1')
-        exec_record_2 = MagicMock(execution_id='exec-2')
+            mock_store = AsyncMock()
+            mock_store.get_jira_project_repos_by_project_key = AsyncMock(
+                return_value=[repo_backend, repo_frontend]
+            )
 
-        mock_execution_service = MagicMock()
-        mock_execution_service.store = mock_store
-        mock_execution_service.create_execution = AsyncMock(
-            side_effect=[
-                (exec_record_1, True),
-                (exec_record_2, True),
-            ]
-        )
-        mock_execution_service.transition_state = AsyncMock()
+            mock_execution_service = MagicMock()
+            mock_execution_service.store = mock_store
+            mock_execution_service.create_execution = AsyncMock(
+                return_value=(MagicMock(execution_id='exec-1'), True)
+            )
+            mock_execution_service.transition_state = AsyncMock()
 
-        mock_openhands_client = MagicMock()
-        mock_openhands_client.create_conversation = AsyncMock(
-            side_effect=['conv-1', 'conv-2']
-        )
+            mock_openhands_client = MagicMock()
+            mock_openhands_client.create_conversation = AsyncMock(
+                return_value='conv-1'
+            )
 
-        service = JiraAutomationService(
-            execution_service=mock_execution_service,
-            openhands_client=mock_openhands_client,
-        )
+            service = JiraAutomationService(
+                execution_service=mock_execution_service,
+                openhands_client=mock_openhands_client,
+            )
 
-        mock_request = MagicMock()
-        mock_request.base_url = 'http://localhost:8000'
-        mock_state = MagicMock()
+            mock_request = MagicMock()
+            mock_request.base_url = 'http://localhost:8000'
+            mock_state = MagicMock()
 
-        result = await service.process_issue_created(
-            payload=payload,
-            state=mock_state,
-            request=mock_request,
-        )
+            result = await service.process_issue_created(
+                payload=payload,
+                state=mock_state,
+                request=mock_request,
+            )
 
-        # Multi-repo result
-        assert result['status'] == 'multi'
-        assert len(result['executions']) == 2
+        # Single execution with backend as primary
+        assert result['status'] == 'running'
+        assert result['execution_id'] == 'exec-1'
+        assert result['repository'] == 'thatIsSharif/workflow-engine'
+        assert 'thatIsSharif/dsd-frontend' in result['other_repos']
 
-        # Verify repos were resolved from DB (not custom field)
+        # Verify repos were resolved from DB
         mock_store.get_jira_project_repos_by_project_key.assert_called_once_with('KAN')
 
-        # Phase 1: two executions created with different repos
-        assert mock_execution_service.create_execution.call_count == 2
-        repos_used = [
-            call[1]['repository']
-            for call in mock_execution_service.create_execution.call_args_list
-        ]
-        assert 'thatIsSharif/workflow-engine' in repos_used
-        assert 'thatIsSharif/dsd-frontend' in repos_used
+        # One execution created with backend repo
+        assert mock_execution_service.create_execution.call_count == 1
+        assert mock_execution_service.create_execution.call_args[1]['repository'] == (
+            'thatIsSharif/workflow-engine'
+        )
 
-        # Each repo gets a unique event ID
-        event_ids = [
-            call[1]['source_event_id']
-            for call in mock_execution_service.create_execution.call_args_list
-        ]
-        assert event_ids[0] != event_ids[1]
+        # One conversation created
+        assert mock_openhands_client.create_conversation.call_count == 1
+        assert mock_openhands_client.create_conversation.call_args[1]['repository'] == (
+            'thatIsSharif/workflow-engine'
+        )
 
-        # Phase 2: two conversations created (sequentially)
-        assert mock_openhands_client.create_conversation.call_count == 2
+    @pytest.mark.asyncio
+    async def test_multi_repo_frontend_task_type(self):
+        """When task_type='frontend' and a frontend repo exists, it becomes primary."""
+        from unittest.mock import AsyncMock, MagicMock, patch
 
-        # Transition to QUEUED was called for each (parallel),
-        # then RUNNING for each (sequential)
-        queued_calls = [
-            c for c in mock_execution_service.transition_state.call_args_list
-            if c[0][1].value == 'QUEUED'
-        ]
-        running_calls = [
-            c for c in mock_execution_service.transition_state.call_args_list
-            if c[0][1].value == 'RUNNING'
-        ]
-        assert len(queued_calls) == 2
-        assert len(running_calls) == 2
+        from openhands.app_server.automation.execution_models import (
+            JiraProjectRepositoryRecord,
+        )
+        from openhands.app_server.automation.jira_automation_service import (
+            JiraAutomationService,
+        )
+
+        payload = {
+            'webhookEvent': 'jira:issue_created',
+            'issue_event_type_name': 'issue_assigned',
+            'issue': {
+                'id': '10002',
+                'key': 'KAN-43',
+                'fields': {
+                    'summary': 'Frontend-only task',
+                    'description': 'Only UI changes needed',
+                    'issuetype': {'name': 'Task'},
+                    'priority': {'name': 'High'},
+                    'reporter': {'displayName': 'Dev'},
+                    'labels': [],
+                    'project': {'key': 'KAN'},
+                },
+            },
+            'changelog': {
+                'items': [{'field': 'assignee', 'to': 'target-user'}]
+            },
+            'timestamp': 3000000,
+        }
+
+        repo_backend = JiraProjectRepositoryRecord(
+            id=1, jira_project_key='KAN',
+            repository='workflow-engine', owner='thatIsSharif',
+            default_branch='main', label='backend',
+        )
+        repo_frontend = JiraProjectRepositoryRecord(
+            id=2, jira_project_key='KAN',
+            repository='dsd-frontend', owner='thatIsSharif',
+            default_branch='main', label='frontend',
+        )
+
+        with patch(
+            'openhands.app_server.automation.jira_automation_service.ComplexityAnalyzer.from_env'
+        ) as mock_from_env:
+            mock_analyzer = MagicMock()
+            mock_analyzer.analyze = AsyncMock(
+                return_value=MagicMock(
+                    complexity='low', task_type='frontend', reasoning='simple UI change'
+                )
+            )
+            mock_from_env.return_value = mock_analyzer
+
+            mock_store = AsyncMock()
+            mock_store.get_jira_project_repos_by_project_key = AsyncMock(
+                return_value=[repo_backend, repo_frontend]
+            )
+
+            mock_execution_service = MagicMock()
+            mock_execution_service.store = mock_store
+            mock_execution_service.create_execution = AsyncMock(
+                return_value=(MagicMock(execution_id='exec-2'), True)
+            )
+            mock_execution_service.transition_state = AsyncMock()
+
+            mock_openhands_client = MagicMock()
+            mock_openhands_client.create_conversation = AsyncMock(
+                return_value='conv-2'
+            )
+
+            service = JiraAutomationService(
+                execution_service=mock_execution_service,
+                openhands_client=mock_openhands_client,
+            )
+
+            mock_request = MagicMock()
+            mock_request.base_url = 'http://localhost:8000'
+            mock_state = MagicMock()
+
+            result = await service.process_issue_created(
+                payload=payload,
+                state=mock_state,
+                request=mock_request,
+            )
+
+        # Frontend repo is primary
+        assert result['status'] == 'running'
+        assert result['repository'] == 'thatIsSharif/dsd-frontend'
+        assert 'thatIsSharif/workflow-engine' in result['other_repos']
+
+        assert mock_execution_service.create_execution.call_args[1]['repository'] == (
+            'thatIsSharif/dsd-frontend'
+        )
+        assert mock_openhands_client.create_conversation.call_args[1]['repository'] == (
+            'thatIsSharif/dsd-frontend'
+        )
+
+    @pytest.mark.asyncio
+    async def test_hybrid_task_uses_backend_primary(self):
+        """When task_type='hybrid', backend is primary (frontend cloned by agent)."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from openhands.app_server.automation.execution_models import (
+            JiraProjectRepositoryRecord,
+        )
+        from openhands.app_server.automation.jira_automation_service import (
+            JiraAutomationService,
+        )
+
+        payload = {
+            'webhookEvent': 'jira:issue_created',
+            'issue_event_type_name': 'issue_assigned',
+            'issue': {
+                'id': '10003',
+                'key': 'KAN-44',
+                'fields': {
+                    'summary': 'Hybrid task',
+                    'description': 'API + UI changes needed',
+                    'issuetype': {'name': 'Story'},
+                    'priority': {'name': 'High'},
+                    'reporter': {'displayName': 'Dev'},
+                    'labels': [],
+                    'project': {'key': 'KAN'},
+                },
+            },
+            'changelog': {
+                'items': [{'field': 'assignee', 'to': 'target-user'}]
+            },
+            'timestamp': 4000000,
+        }
+
+        repo_backend = JiraProjectRepositoryRecord(
+            id=1, jira_project_key='KAN',
+            repository='workflow-engine', owner='thatIsSharif',
+            default_branch='main', label='backend',
+        )
+        repo_frontend = JiraProjectRepositoryRecord(
+            id=2, jira_project_key='KAN',
+            repository='dsd-frontend', owner='thatIsSharif',
+            default_branch='main', label='frontend',
+        )
+
+        with patch(
+            'openhands.app_server.automation.jira_automation_service.ComplexityAnalyzer.from_env'
+        ) as mock_from_env:
+            mock_analyzer = MagicMock()
+            mock_analyzer.analyze = AsyncMock(
+                return_value=MagicMock(
+                    complexity='complex', task_type='hybrid', reasoning='both layers'
+                )
+            )
+            mock_from_env.return_value = mock_analyzer
+
+            mock_store = AsyncMock()
+            mock_store.get_jira_project_repos_by_project_key = AsyncMock(
+                return_value=[repo_backend, repo_frontend]
+            )
+
+            mock_execution_service = MagicMock()
+            mock_execution_service.store = mock_store
+            mock_execution_service.create_execution = AsyncMock(
+                return_value=(MagicMock(execution_id='exec-3'), True)
+            )
+            mock_execution_service.transition_state = AsyncMock()
+
+            mock_openhands_client = MagicMock()
+            mock_openhands_client.create_conversation = AsyncMock(
+                return_value='conv-3'
+            )
+
+            service = JiraAutomationService(
+                execution_service=mock_execution_service,
+                openhands_client=mock_openhands_client,
+            )
+
+            mock_request = MagicMock()
+            mock_request.base_url = 'http://localhost:8000'
+            mock_state = MagicMock()
+
+            result = await service.process_issue_created(
+                payload=payload,
+                state=mock_state,
+                request=mock_request,
+            )
+
+        # Hybrid → backend primary
+        assert result['status'] == 'running'
+        assert result['repository'] == 'thatIsSharif/workflow-engine'
+        assert 'thatIsSharif/dsd-frontend' in result['other_repos']
+
+    @pytest.mark.asyncio
+    async def test_analysis_failure_falls_back_to_backend(self):
+        """When complexity analysis returns None, fall back to backend primary."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from openhands.app_server.automation.execution_models import (
+            JiraProjectRepositoryRecord,
+        )
+        from openhands.app_server.automation.jira_automation_service import (
+            JiraAutomationService,
+        )
+
+        payload = {
+            'webhookEvent': 'jira:issue_created',
+            'issue_event_type_name': 'issue_assigned',
+            'issue': {
+                'id': '10004',
+                'key': 'KAN-45',
+                'fields': {
+                    'summary': 'Analysis fails task',
+                    'description': 'Should fallback to default',
+                    'issuetype': {'name': 'Bug'},
+                    'priority': {'name': 'Low'},
+                    'reporter': {'displayName': 'Dev'},
+                    'labels': [],
+                    'project': {'key': 'KAN'},
+                },
+            },
+            'changelog': {
+                'items': [{'field': 'assignee', 'to': 'target-user'}]
+            },
+            'timestamp': 5000000,
+        }
+
+        repo_backend = JiraProjectRepositoryRecord(
+            id=1, jira_project_key='KAN',
+            repository='workflow-engine', owner='thatIsSharif',
+            default_branch='main', label='backend',
+        )
+        repo_frontend = JiraProjectRepositoryRecord(
+            id=2, jira_project_key='KAN',
+            repository='dsd-frontend', owner='thatIsSharif',
+            default_branch='main', label='frontend',
+        )
+
+        with patch(
+            'openhands.app_server.automation.jira_automation_service.ComplexityAnalyzer.from_env'
+        ) as mock_from_env:
+            mock_analyzer = MagicMock()
+            mock_analyzer.analyze = AsyncMock(return_value=None)
+            mock_from_env.return_value = mock_analyzer
+
+            mock_store = AsyncMock()
+            mock_store.get_jira_project_repos_by_project_key = AsyncMock(
+                return_value=[repo_backend, repo_frontend]
+            )
+
+            mock_execution_service = MagicMock()
+            mock_execution_service.store = mock_store
+            mock_execution_service.create_execution = AsyncMock(
+                return_value=(MagicMock(execution_id='exec-4'), True)
+            )
+            mock_execution_service.transition_state = AsyncMock()
+
+            mock_openhands_client = MagicMock()
+            mock_openhands_client.create_conversation = AsyncMock(
+                return_value='conv-4'
+            )
+
+            service = JiraAutomationService(
+                execution_service=mock_execution_service,
+                openhands_client=mock_openhands_client,
+            )
+
+            mock_request = MagicMock()
+            mock_request.base_url = 'http://localhost:8000'
+            mock_state = MagicMock()
+
+            result = await service.process_issue_created(
+                payload=payload,
+                state=mock_state,
+                request=mock_request,
+            )
+
+        # Fallback → backend primary (existing behaviour)
+        assert result['status'] == 'running'
+        assert result['repository'] == 'thatIsSharif/workflow-engine'
 
     @pytest.mark.asyncio
     async def test_single_repo_still_works(self):
-        """When the DB has only 1 repo, result should be backward-compatible
-        (single dict, not multi)."""
-        from unittest.mock import AsyncMock, MagicMock
+        """When the DB has only 1 repo, result should be backward-compatible."""
+        from unittest.mock import AsyncMock, MagicMock, patch
 
         from openhands.app_server.automation.execution_models import (
             JiraProjectRepositoryRecord,
@@ -492,37 +757,48 @@ class TestProcessIssueCreatedMultiRepo:
             default_branch='main', label='backend',
         )
 
-        mock_store = AsyncMock()
-        mock_store.get_jira_project_repos_by_project_key = AsyncMock(
-            return_value=[repo_single]
-        )
+        with patch(
+            'openhands.app_server.automation.jira_automation_service.ComplexityAnalyzer.from_env'
+        ) as mock_from_env:
+            mock_analyzer = MagicMock()
+            mock_analyzer.analyze = AsyncMock(
+                return_value=MagicMock(
+                    complexity='medium', task_type='backend', reasoning='test'
+                )
+            )
+            mock_from_env.return_value = mock_analyzer
 
-        mock_execution_service = MagicMock()
-        mock_execution_service.store = mock_store
-        mock_execution_service.create_execution = AsyncMock(
-            return_value=(MagicMock(execution_id='exec-3'), True)
-        )
-        mock_execution_service.transition_state = AsyncMock()
+            mock_store = AsyncMock()
+            mock_store.get_jira_project_repos_by_project_key = AsyncMock(
+                return_value=[repo_single]
+            )
 
-        mock_openhands_client = MagicMock()
-        mock_openhands_client.create_conversation = AsyncMock(
-            return_value='conv-3'
-        )
+            mock_execution_service = MagicMock()
+            mock_execution_service.store = mock_store
+            mock_execution_service.create_execution = AsyncMock(
+                return_value=(MagicMock(execution_id='exec-3'), True)
+            )
+            mock_execution_service.transition_state = AsyncMock()
 
-        service = JiraAutomationService(
-            execution_service=mock_execution_service,
-            openhands_client=mock_openhands_client,
-        )
+            mock_openhands_client = MagicMock()
+            mock_openhands_client.create_conversation = AsyncMock(
+                return_value='conv-3'
+            )
 
-        mock_request = MagicMock()
-        mock_request.base_url = 'http://localhost:8000'
-        mock_state = MagicMock()
+            service = JiraAutomationService(
+                execution_service=mock_execution_service,
+                openhands_client=mock_openhands_client,
+            )
 
-        result = await service.process_issue_created(
-            payload=payload,
-            state=mock_state,
-            request=mock_request,
-        )
+            mock_request = MagicMock()
+            mock_request.base_url = 'http://localhost:8000'
+            mock_state = MagicMock()
+
+            result = await service.process_issue_created(
+                payload=payload,
+                state=mock_state,
+                request=mock_request,
+            )
 
         # Single repo -> backward-compatible single result dict
         assert result['status'] == 'running'
@@ -532,7 +808,7 @@ class TestProcessIssueCreatedMultiRepo:
     @pytest.mark.asyncio
     async def test_no_repos_configured_returns_error(self):
         """When no repos are configured for the project, return an error."""
-        from unittest.mock import AsyncMock, MagicMock
+        from unittest.mock import AsyncMock, MagicMock, patch
 
         from openhands.app_server.automation.jira_automation_service import (
             JiraAutomationService,
@@ -560,30 +836,41 @@ class TestProcessIssueCreatedMultiRepo:
             'timestamp': 4000000,
         }
 
-        mock_store = AsyncMock()
-        mock_store.get_jira_project_repos_by_project_key = AsyncMock(
-            return_value=[]
-        )
+        with patch(
+            'openhands.app_server.automation.jira_automation_service.ComplexityAnalyzer.from_env'
+        ) as mock_from_env:
+            mock_analyzer = MagicMock()
+            mock_analyzer.analyze = AsyncMock(
+                return_value=MagicMock(
+                    complexity='low', task_type='backend', reasoning='test'
+                )
+            )
+            mock_from_env.return_value = mock_analyzer
 
-        mock_execution_service = MagicMock()
-        mock_execution_service.store = mock_store
+            mock_store = AsyncMock()
+            mock_store.get_jira_project_repos_by_project_key = AsyncMock(
+                return_value=[]
+            )
 
-        mock_openhands_client = MagicMock()
+            mock_execution_service = MagicMock()
+            mock_execution_service.store = mock_store
 
-        service = JiraAutomationService(
-            execution_service=mock_execution_service,
-            openhands_client=mock_openhands_client,
-        )
+            mock_openhands_client = MagicMock()
 
-        mock_request = MagicMock()
-        mock_request.base_url = 'http://localhost:8000'
-        mock_state = MagicMock()
+            service = JiraAutomationService(
+                execution_service=mock_execution_service,
+                openhands_client=mock_openhands_client,
+            )
 
-        result = await service.process_issue_created(
-            payload=payload,
-            state=mock_state,
-            request=mock_request,
-        )
+            mock_request = MagicMock()
+            mock_request.base_url = 'http://localhost:8000'
+            mock_state = MagicMock()
+
+            result = await service.process_issue_created(
+                payload=payload,
+                state=mock_state,
+                request=mock_request,
+            )
 
         assert result['status'] == 'failed'
         assert 'No repositories configured' in result['error']

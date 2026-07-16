@@ -6,6 +6,7 @@ Uses the OSS database session pattern (get_global_config().db_session).
 from __future__ import annotations
 
 import contextlib
+import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import AsyncGenerator
@@ -84,8 +85,6 @@ class ExecutionStore:
             max_budget: Optional max budget override for the task (in USD).
                 Falls back to OH_AUTOMATION_DEFAULT_MAX_BUDGET env var.
         """
-        import os
-
         state = ExecutionState.RECEIVED.value
 
         # Apply env var defaults if not explicitly provided

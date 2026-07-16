@@ -5,6 +5,7 @@ You are working on {{ repo_label }} repository for Jira issue {{ issue_key }}.
 Issue Key: {{ issue_key }}
 Title: {{ title }}
 Type: {{ issue_type }} | Priority: {{ priority }}
+Task Type: {{ task_type | capitalize }}
 
 Description:
 {{ description }}
@@ -13,6 +14,14 @@ Repository: {{ repository }}
 Repository Label: {{ repo_label }}
 Default Branch: {{ default_branch }}
 Working Branch: {{ branch }}
+
+{% if task_type == 'hybrid' and other_repos %}
+## Hybrid Task — Both Repositories Likely Need Changes
+
+This issue has been classified as a **HYBRID** task, meaning changes are
+expected in **both** the {{ repo_label }} and other repositories listed below.
+Plan your work accordingly across all repositories.
+{% endif %}
 
 {% if other_repos %}
 ## Other Repositories Available (Clone if needed)

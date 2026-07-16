@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import traceback
 from dataclasses import dataclass
 
 from fastapi import Request
@@ -161,7 +162,5 @@ class OpenHandsClient:
                 return conversation_id
 
             except Exception:
-                import traceback
-
                 logger.error(traceback.format_exc())
                 return None

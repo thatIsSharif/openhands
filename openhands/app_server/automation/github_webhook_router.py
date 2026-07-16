@@ -24,6 +24,9 @@ from fastapi import APIRouter, BackgroundTasks, Request
 from pydantic import BaseModel
 
 from openhands.agent_server.models import OpenHandsModel
+from openhands.app_server.app_conversation.app_conversation_models import (
+    AppConversationInfo,
+)
 from openhands.app_server.automation.execution_service import (
     ExecutionService,
 )
@@ -481,10 +484,6 @@ async def post_github_pr_comment(
                     not conversation.github_pr
                     or pr_url not in conversation.github_pr
                 ):
-                    from openhands.app_server.app_conversation.app_conversation_models import (
-                        AppConversationInfo,
-                    )
-
                     github_pr = (
                         list(conversation.github_pr)
                         if conversation.github_pr

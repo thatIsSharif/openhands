@@ -15,21 +15,24 @@ import warnings
 from dataclasses import dataclass
 from typing import Literal
 
+# Suppress litellm deprecation noise on import
 with warnings.catch_warnings():
     warnings.simplefilter('ignore')
-    import litellm
+    import litellm  # noqa: F811
 
 from openhands.app_server.utils.logger import openhands_logger as logger
 
 from .prompt_renderer import render_prompt
 
 ComplexityTier = Literal['complex', 'medium', 'low']
+TaskType = Literal['backend', 'frontend', 'hybrid']
 
 
 @dataclass(frozen=True)
 class ComplexityResult:
     complexity: ComplexityTier
     reasoning: str
+    task_type: str | None = None
 
 
 @dataclass
@@ -107,7 +110,7 @@ class ComplexityAnalyzer:
 
     @staticmethod
     def _parse_response(content: str) -> ComplexityResult | None:
-        """Extract a complexity tier from *content*.
+        """Extract complexity tier and task type from *content*.
 
         Tries JSON first, then falls back to finding
         the first occurrence of ``complex``, ``medium``, or ``low`` in the text.
@@ -122,9 +125,14 @@ class ComplexityAnalyzer:
             data = json.loads(stripped)
             complexity = data.get('complexity', '').lower().strip()
             if complexity in ('complex', 'medium', 'low'):
+                task_type_raw = data.get('task_type', '')
+                task_type = task_type_raw.lower().strip() if isinstance(task_type_raw, str) else None
+                if task_type not in ('backend', 'frontend', 'hybrid'):
+                    task_type = None
                 return ComplexityResult(
                     complexity=complexity,  # type: ignore[arg-type]
                     reasoning=data.get('reasoning', ''),
+                    task_type=task_type,
                 )
         except (json.JSONDecodeError, TypeError):
             pass

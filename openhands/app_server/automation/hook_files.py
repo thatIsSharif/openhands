@@ -10,6 +10,7 @@ via workspace.execute_command during run_setup_scripts.
 """
 
 import base64
+import json
 import logging
 import pathlib
 
@@ -46,17 +47,15 @@ def _build_hooks_json(project_dir: str) -> str:
     Without the 'hooks' wrapper, 'type' and 'command' are extra fields
     that get silently dropped (extra: ignore) — no hooks ever register.
     """
-    import json
-
     return json.dumps({
-        "pre_tool_use": [
+        'pre_tool_use': [
             {
-                "matcher": "terminal",
-                "hooks": [
+                'matcher': 'terminal',
+                'hooks': [
                     {
-                        "type": "command",
-                        "command": f"bash {project_dir}/.openhands/hooks/block_dangerous_commands.sh",
-                        "timeout": 10,
+                        'type': 'command',
+                        'command': f'bash {project_dir}/.openhands/hooks/block_dangerous_commands.sh',
+                        'timeout': 10,
                     }
                 ],
             }
