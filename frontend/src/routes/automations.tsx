@@ -354,15 +354,8 @@ function AutomationsPage() {
           </div>
         </Card>
 
-        {/* Debug: show item count so user knows data loaded */}
-        {!isLoading && !isError && data && (
-          <div className="px-3 py-1 text-[10px] text-gray-600 text-center">
-            API returned {data.items.length} items (total: {data.total})
-          </div>
-        )}
-
         {/* ── Table ───────────────────────────────────────────────── */}
-        <Card theme="dark" className="w-full">
+        <Card theme="dark" className="w-full overflow-hidden">
           {/* Column headers */}
           <div className="hidden md:flex items-center gap-4 px-5 py-3 border-b border-white/5 text-[11px] uppercase tracking-wider text-gray-500 font-medium">
             <div className="w-5 flex-shrink-0" />
@@ -387,28 +380,41 @@ function AutomationsPage() {
           {isError && <ErrorState onRetry={() => refetch()} />}
 
           {/* Empty state */}
-          {!isLoading && !isError && data?.items?.length === 0 && <EmptyState />}
+          {!isLoading && !isError && data?.items.length === 0 && <EmptyState />}
 
           {/* Rows */}
-          {!isLoading && !isError && data?.items?.length ? (
-            <div className="divide-y divide-white/5">
-              {data.items.map((item) => (
-                <div key={item.conversation_id}>
+          {!isLoading &&
+            !isError &&
+            (data?.items ?? []).map((item) => {
+              const isExpanded = expandedRow === item.conversation_id;
+              return (
+                <React.Fragment key={item.conversation_id}>
                   <button
                     type="button"
                     onClick={() => toggleRow(item.conversation_id)}
                     className={cn(
-                      "w-full flex items-center gap-4 px-5 py-3.5 text-left transition-colors cursor-pointer group hover:bg-white/[0.03]",
-                      expandedRow === item.conversation_id && "bg-white/[0.02]",
+                      "w-full flex items-center gap-4 px-5 py-3.5 text-left transition-colors cursor-pointer group",
+                      "hover:bg-white/[0.03] border-b border-white/5 last:border-b-0",
+                      isExpanded && "bg-white/[0.02]",
                     )}
                   >
                     {/* Expand icon */}
                     <div className="w-5 flex-shrink-0 text-gray-500 group-hover:text-gray-300 transition-colors">
                       <svg
-                        className={cn("w-3.5 h-3.5 transition-transform duration-200", expandedRow === item.conversation_id && "rotate-90")}
-                        viewBox="0 0 12 12" fill="none"
+                        className={cn(
+                          "w-3.5 h-3.5 transition-transform duration-200",
+                          isExpanded && "rotate-90",
+                        )}
+                        viewBox="0 0 12 12"
+                        fill="none"
                       >
-                        <path d="M4.5 2.5L8 6L4.5 9.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                        <path
+                          d="M4.5 2.5L8 6L4.5 9.5"
+                          stroke="currentColor"
+                          strokeWidth="1.5"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        />
                       </svg>
                     </div>
 
@@ -418,21 +424,27 @@ function AutomationsPage() {
                         <span className="text-sm font-medium text-white truncate">
                           {getRunIcon(item)} {getRunLabel(item)}
                         </span>
-                        {item.jira_issue_key && item.github_pr && item.github_pr.length > 0 && (
+                        {item.jira_issue_key && item.github_pr?.length ? (
                           <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-blue-500/10 text-blue-400 border border-blue-500/20 whitespace-nowrap">
-                            +{item.github_pr.length} PR{item.github_pr.length > 1 ? "s" : ""}
+                            +{item.github_pr.length} PR
+                            {item.github_pr.length > 1 ? "s" : ""}
                           </span>
-                        )}
-                        {item.pr_number && item.pr_number.length > 0 && (
+                        ) : null}
+                        {item.pr_number?.length ? (
                           <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 whitespace-nowrap">
                             PR #{item.pr_number[0]}
                           </span>
-                        )}
+                        ) : null}
                       </div>
                       <div className="flex items-center gap-2 mt-0.5">
                         <span className="text-xs text-gray-500 truncate max-w-[200px] sm:max-w-[300px]">
                           {item.title || item.selected_repository || "—"}
                         </span>
+                        {item.selected_repository && (
+                          <span className="text-[10px] text-gray-600 truncate hidden sm:inline">
+                            {item.selected_repository}
+                          </span>
+                        )}
                       </div>
                     </div>
 
@@ -445,30 +457,38 @@ function AutomationsPage() {
 
                     {/* Tokens */}
                     <div className="w-20 text-right">
-                      <span className="text-xs text-gray-400 font-mono">{formatTokens(item.total_tokens)}</span>
+                      <span className="text-xs text-gray-400 font-mono">
+                        {formatTokens(item.total_tokens)}
+                      </span>
                     </div>
 
                     {/* Cost */}
                     <div className="w-20 text-right">
-                      <span className="text-xs font-mono text-gray-400">{formatCost(item.accumulated_cost)}</span>
+                      <span className="text-xs font-mono text-gray-400">
+                        {formatCost(item.accumulated_cost)}
+                      </span>
                     </div>
 
                     {/* Duration */}
                     <div className="w-24 text-right">
-                      <span className="text-xs text-gray-400 font-mono">{formatDuration(item.created_at, item.last_updated_at)}</span>
+                      <span className="text-xs text-gray-400 font-mono">
+                        {formatDuration(item.created_at, item.last_updated_at)}
+                      </span>
                     </div>
 
                     {/* Date */}
                     <div className="w-28 text-right hidden lg:block">
-                      <span className="text-xs text-gray-500">{formatDate(item.created_at)}</span>
+                      <span className="text-xs text-gray-500">
+                        {formatDate(item.created_at)}
+                      </span>
                     </div>
                   </button>
 
-                  {expandedRow === item.conversation_id && <RunDetailPanel item={item} />}
-                </div>
-              ))}
-            </div>
-          ) : null}
+                  {/* Expanded detail */}
+                  {isExpanded && <RunDetailPanel item={item} />}
+                </React.Fragment>
+              );
+            })}
         </Card>
 
         {/* ── Pagination ──────────────────────────────────────────── */}
