@@ -242,14 +242,22 @@ function AutomationsPage() {
     if (!data?.items) {
       return { total: 0, totalCost: 0, todayCount: 0, avgCost: 0 };
     }
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
+    // DB timestamps are UTC — compare in UTC
+    const now = new Date();
+    const todayStart = Date.UTC(
+      now.getUTCFullYear(),
+      now.getUTCMonth(),
+      now.getUTCDate(),
+    );
     let totalCost = 0;
     let todayCount = 0;
     for (const item of data.items) {
       totalCost += item.accumulated_cost ?? 0;
-      if (item.created_at && new Date(item.created_at) >= today) {
-        todayCount++;
+      if (item.created_at) {
+        const ts = new Date(item.created_at).getTime();
+        if (ts >= todayStart) {
+          todayCount++;
+        }
       }
     }
     return {
