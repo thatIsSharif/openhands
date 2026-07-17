@@ -213,7 +213,11 @@ function AutomationsPage() {
   });
 
   const [expandedRow, setExpandedRow] = React.useState<string | null>(null);
-  const searchInputRef = React.useRef<HTMLInputElement>(null);
+  const [searchQuery, setSearchQuery] = React.useState(search ?? "");
+
+  React.useEffect(() => {
+    setSearchQuery(search ?? "");
+  }, [search]);
 
   const toggleRow = (id: string) => {
     setExpandedRow((prev) => (prev === id ? null : id));
@@ -233,8 +237,15 @@ function AutomationsPage() {
 
   const handleSearch = (e: React.FormEvent) => {
     e.preventDefault();
-    const val = searchInputRef.current?.value || null;
-    updateParam("search", val);
+    updateParam("search", searchQuery.trim() || null);
+  };
+
+  const handleSearchQueryChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const value = e.target.value;
+    setSearchQuery(value);
+    if (value.trim() === "" && search != null) {
+      updateParam("search", null);
+    }
   };
 
   // Compute aggregate stats
@@ -277,7 +288,7 @@ function AutomationsPage() {
             <Typography variant="h1" className="text-white">
               🤖 Automation Runs
             </Typography>
-            <Typography variant="span" className="text-gray-500 text-sm mt-1">
+            <Typography variant="span" className="text-gray-500 text-sm mt-3">
               Monitor Jira and GitHub automation activity
             </Typography>
           </div>
@@ -317,9 +328,9 @@ function AutomationsPage() {
           {/* Search */}
           <form onSubmit={handleSearch} className="flex-1 flex gap-2 w-full sm:w-auto">
             <input
-              ref={searchInputRef}
               type="text"
-              defaultValue={search ?? ""}
+              value={searchQuery}
+              onChange={handleSearchQueryChange}
               placeholder="Search by issue, title, or repo..."
               className="flex-1 px-3 py-1.5 rounded-lg bg-white/5 border border-white/10 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-white/20 transition-colors"
             />
@@ -355,7 +366,7 @@ function AutomationsPage() {
         </Card>
 
         {/* ── Table ───────────────────────────────────────────────── */}
-        <Card theme="dark" className="w-full overflow-hidden">
+        <Card theme="dark" className="flex-col w-full overflow-hidden">
           {/* Column headers */}
           <div className="hidden md:flex items-center gap-4 px-5 py-3 border-b border-white/5 text-[11px] uppercase tracking-wider text-gray-500 font-medium">
             <div className="w-5 flex-shrink-0" />
@@ -430,10 +441,15 @@ function AutomationsPage() {
                             {item.github_pr.length > 1 ? "s" : ""}
                           </span>
                         ) : null}
-                        {item.pr_number?.length ? (
-                          <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 whitespace-nowrap">
-                            PR #{item.pr_number[0]}
-                          </span>
+                        {item.github_pr?.length ? (
+                          <a
+                            href={item.github_pr[0]}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="text-[10px] px-1.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 overflow-hidden text-ellipsis whitespace-nowrap max-w-[160px] block"
+                          >
+                            {item.github_pr[0].replace(/^https?:\/\//, "")}
+                          </a>
                         ) : null}
                       </div>
                       <div className="flex items-center gap-2 mt-0.5">
