@@ -44,6 +44,9 @@ from openhands.app_server.integrations.service_types import (
 from openhands.app_server.utils.auth import looks_like_jwt
 from openhands.app_server.utils.http_session import httpx_verify_option
 from openhands.app_server.utils.logger import openhands_logger as logger
+from openhands.app_server.utils.github_app import (
+                GitHubAppTokenManager,
+            )
 
 
 class ProviderToken(BaseModel):
@@ -429,6 +432,12 @@ class ProviderHandler:
             except Exception as e:
                 errors.append(f'{provider.value}: {str(e)}')
 
+        # If no provider tokens are available, try GitHub App installation token
+        # as a fallback.  This supports GitHub App-only setups where no PAT is stored.
+        gh_app_repo = await self._verify_repo_via_github_app(repository)
+        if gh_app_repo:
+            return gh_app_repo
+
         # Log detailed error based on whether we had tokens or not
         # For optional repositories (like org-level microagents), use debug level
         log_fn = logger.debug if is_optional else logger.error
@@ -449,6 +458,47 @@ class ProviderHandler:
                 f'Failed to access repository {repository}: Unknown error (no providers tried, no errors recorded)'
             )
         raise AuthenticationError(f'Unable to access repo {repository}')
+
+    @staticmethod
+    async def _verify_repo_via_github_app(
+        repository: str,
+    ) -> Repository | None:
+        """Try to verify a repository using a GitHub App installation token.
+
+        Used as a fallback when no provider tokens are available.
+        """
+        try:
+            if not GitHubAppTokenManager.is_available():
+                return None
+            token = GitHubAppTokenManager.get_token_for_installation()
+
+            # Verify via the GitHub API using the installation token
+            async with httpx.AsyncClient(
+                verify=httpx_verify_option()
+            ) as client:
+                resp = await client.get(
+                    f'https://api.github.com/repos/{repository}',
+                    headers={
+                        'Authorization': f'Bearer {token}',
+                        'Accept': 'application/vnd.github.v3+json',
+                    },
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    return Repository(
+                        id=str(data.get('id', 0)),
+                        full_name=data.get('full_name', repository),
+                        is_public=not data.get('private', True),
+                        main_branch=data.get('default_branch', 'main'),
+                        git_provider=ProviderType.GITHUB,
+                    )
+                return None
+        except Exception:
+            logger.warning(
+                'Failed to verify repository via GitHub App token',
+                exc_info=True,
+            )
+            return None
 
     async def get_branches(
         self,
@@ -547,117 +597,152 @@ class ProviderHandler:
             if '/' in domain:
                 domain = domain.split('/')[0]
 
-        # Try to use token if available, otherwise use public URL
+        # Try to use token if available, otherwise try GitHub App fallback,
+        # then fall back to public URL.
+        pat_token: str | None = None
         if self.provider_tokens and provider in self.provider_tokens:
             git_token = self.provider_tokens[provider].token
             if git_token:
-                token_value = git_token.get_secret_value()
-                if provider == ProviderType.GITLAB:
+                pat_token = git_token.get_secret_value()
+
+        if pat_token:
+            token_value = pat_token
+            if provider == ProviderType.GITLAB:
+                remote_url = (
+                    f'{protocol}://oauth2:{token_value}@{domain}/{repo_name}.git'
+                )
+            elif provider == ProviderType.BITBUCKET:
+                # For Bitbucket, handle email:api_token format
+                if ':' in token_value:
+                    # API token format: email:api_token
+                    # Percent-encode both email and token as email contains '@'
+                    user, password = token_value.split(':', 1)
+                    url_creds = f'{quote(user, safe="")}:{quote(password, safe="")}'
                     remote_url = (
-                        f'{protocol}://oauth2:{token_value}@{domain}/{repo_name}.git'
+                        f'{protocol}://{url_creds}@{domain}/{repo_name}.git'
                     )
-                elif provider == ProviderType.BITBUCKET:
-                    # For Bitbucket, handle email:api_token format
-                    if ':' in token_value:
-                        # API token format: email:api_token
-                        # Percent-encode both email and token as email contains '@'
-                        user, password = token_value.split(':', 1)
-                        url_creds = f'{quote(user, safe="")}:{quote(password, safe="")}'
-                        remote_url = (
-                            f'{protocol}://{url_creds}@{domain}/{repo_name}.git'
-                        )
-                    else:
-                        # Access token format: use x-token-auth
-                        remote_url = f'{protocol}://x-token-auth:{quote(token_value, safe="")}@{domain}/{repo_name}.git'
-                elif provider == ProviderType.BITBUCKET_DATA_CENTER:
-                    # DC uses HTTP Basic auth — token must be in username:token format
-                    project, repo_slug = (
-                        repo_name.split('/', 1)
-                        if '/' in repo_name
-                        else (repo_name, repo_name)
-                    )
-                    scm_path = f'scm/{project.lower()}/{repo_slug}.git'
-                    # Percent-encode each credential part so special characters
-                    # (e.g. @, #, /) don't break the URL.
-                    if ':' in token_value:
-                        dc_user, dc_pass = token_value.split(':', 1)
-                        url_creds = (
-                            f'{quote(dc_user, safe="")}:{quote(dc_pass, safe="")}'
-                        )
-                    else:
-                        url_creds = f'x-token-auth:{quote(token_value, safe="")}'
-                    remote_url = f'{protocol}://{url_creds}@{domain}/{scm_path}'
-                elif provider == ProviderType.AZURE_DEVOPS:
-                    # Entra OAuth tokens work with Azure Repos through a Bearer
-                    # header. Return a clean remote URL here; callers that need
-                    # to run git commands should add the header out-of-band.
-                    # PATs still use Basic auth for OSS/manual-token flows.
-                    # Format: https://{anything}:{PAT}@dev.azure.com/{org}/{project}/_git/{repo}
-                    # The username can be anything (it's ignored), but cannot be empty
-                    # We use the org name as the username for clarity
-                    # repo_name is in format: org/project/repo
-                    logger.info(
-                        f'[Azure DevOps] Constructing authenticated git URL for repository: {repo_name}'
-                    )
-                    logger.debug(f'[Azure DevOps] Original domain: {domain}')
-                    logger.debug(
-                        f'[Azure DevOps] Token available: {bool(token_value)}, '
-                        f'Token length: {len(token_value) if token_value else 0}'
-                    )
-
-                    # Remove domain prefix if it exists in domain variable
-                    clean_domain = domain.replace('https://', '').replace('http://', '')
-                    logger.debug(f'[Azure DevOps] Cleaned domain: {clean_domain}')
-
-                    parts = repo_name.split('/')
-                    logger.debug(
-                        f'[Azure DevOps] Repository parts: {parts} (length: {len(parts)})'
-                    )
-
-                    if len(parts) >= 3:
-                        org, project, repo = parts[0], parts[1], parts[2]
-                        logger.info(
-                            f'[Azure DevOps] Parsed repository - org: {org}, project: {project}, repo: {repo}'
-                        )
-                        # URL-encode org, project, and repo to handle spaces and special characters
-                        org_encoded = quote(org, safe='')
-                        project_encoded = quote(project, safe='')
-                        repo_encoded = quote(repo, safe='')
-                        logger.debug(
-                            f'[Azure DevOps] URL-encoded parts - org: {org_encoded}, project: {project_encoded}, repo: {repo_encoded}'
-                        )
-                        # Use org name as username (it's ignored by Azure DevOps but required for git)
-                        if looks_like_jwt(token_value):
-                            remote_url = f'https://{clean_domain}/{org_encoded}/{project_encoded}/_git/{repo_encoded}'
-                            logger.info(
-                                f'[Azure DevOps] Constructed OAuth git URL: {remote_url}'
-                            )
-                        else:
-                            remote_url = f'https://{org}:***@{clean_domain}/{org_encoded}/{project_encoded}/_git/{repo_encoded}'
-                            logger.info(
-                                f'[Azure DevOps] Constructed PAT git URL (token masked): {remote_url}'
-                            )
-                            remote_url = f'https://{org}:{quote(token_value, safe="")}@{clean_domain}/{org_encoded}/{project_encoded}/_git/{repo_encoded}'
-                    else:
-                        # Fallback if format is unexpected
-                        logger.warning(
-                            f'[Azure DevOps] Unexpected repository format: {repo_name}. '
-                            f'Expected org/project/repo (3 parts), got {len(parts)} parts. '
-                            'Using fallback URL format.'
-                        )
-                        remote_url = (
-                            f'https://user:{token_value}@{clean_domain}/{repo_name}.git'
-                        )
-                        logger.warning(
-                            f'[Azure DevOps] Fallback URL constructed (token masked): '
-                            f'https://user:***@{clean_domain}/{repo_name}.git'
-                        )
                 else:
-                    # GitHub, Forgejo
-                    remote_url = f'{protocol}://{token_value}@{domain}/{repo_name}.git'
+                    # Access token format: use x-token-auth
+                    remote_url = f'{protocol}://x-token-auth:{quote(token_value, safe="")}@{domain}/{repo_name}.git'
+            elif provider == ProviderType.BITBUCKET_DATA_CENTER:
+                # DC uses HTTP Basic auth — token must be in username:token format
+                project, repo_slug = (
+                    repo_name.split('/', 1)
+                    if '/' in repo_name
+                    else (repo_name, repo_name)
+                )
+                scm_path = f'scm/{project.lower()}/{repo_slug}.git'
+                # Percent-encode each credential part so special characters
+                # (e.g. @, #, /) don't break the URL.
+                if ':' in token_value:
+                    dc_user, dc_pass = token_value.split(':', 1)
+                    url_creds = (
+                        f'{quote(dc_user, safe="")}:{quote(dc_pass, safe="")}'
+                    )
+                else:
+                    url_creds = f'x-token-auth:{quote(token_value, safe="")}'
+                remote_url = f'{protocol}://{url_creds}@{domain}/{scm_path}'
+            elif provider == ProviderType.AZURE_DEVOPS:
+                # Entra OAuth tokens work with Azure Repos through a Bearer
+                # header. Return a clean remote URL here; callers that need
+                # to run git commands should add the header out-of-band.
+                # PATs still use Basic auth for OSS/manual-token flows.
+                # Format: https://{anything}:{PAT}@dev.azure.com/{org}/{project}/_git/{repo}
+                # The username can be anything (it's ignored), but cannot be empty
+                # We use the org name as the username for clarity
+                # repo_name is in format: org/project/repo
+                logger.info(
+                    f'[Azure DevOps] Constructing authenticated git URL for repository: {repo_name}'
+                )
+                logger.debug(f'[Azure DevOps] Original domain: {domain}')
+                logger.debug(
+                    f'[Azure DevOps] Token available: {bool(token_value)}, '
+                    f'Token length: {len(token_value) if token_value else 0}'
+                )
+
+                # Remove domain prefix if it exists in domain variable
+                clean_domain = domain.replace('https://', '').replace('http://', '')
+                logger.debug(f'[Azure DevOps] Cleaned domain: {clean_domain}')
+
+                parts = repo_name.split('/')
+                logger.debug(
+                    f'[Azure DevOps] Repository parts: {parts} (length: {len(parts)})'
+                )
+
+                if len(parts) >= 3:
+                    org, project, repo = parts[0], parts[1], parts[2]
+                    logger.info(
+                        f'[Azure DevOps] Parsed repository - org: {org}, project: {project}, repo: {repo}'
+                    )
+                    # URL-encode org, project, and repo to handle spaces and special characters
+                    org_encoded = quote(org, safe='')
+                    project_encoded = quote(project, safe='')
+                    repo_encoded = quote(repo, safe='')
+                    logger.debug(
+                        f'[Azure DevOps] URL-encoded parts - org: {org_encoded}, project: {project_encoded}, repo: {repo_encoded}'
+                    )
+                    # Use org name as username (it's ignored by Azure DevOps but required for git)
+                    if looks_like_jwt(token_value):
+                        remote_url = f'https://{clean_domain}/{org_encoded}/{project_encoded}/_git/{repo_encoded}'
+                        logger.info(
+                            f'[Azure DevOps] Constructed OAuth git URL: {remote_url}'
+                        )
+                    else:
+                        remote_url = f'https://{org}:***@{clean_domain}/{org_encoded}/{project_encoded}/_git/{repo_encoded}'
+                        logger.info(
+                            f'[Azure DevOps] Constructed PAT git URL (token masked): {remote_url}'
+                        )
+                        remote_url = f'https://{org}:{quote(token_value, safe="")}@{clean_domain}/{org_encoded}/{project_encoded}/_git/{repo_encoded}'
+                else:
+                    # Fallback if format is unexpected
+                    logger.warning(
+                        f'[Azure DevOps] Unexpected repository format: {repo_name}. '
+                        f'Expected org/project/repo (3 parts), got {len(parts)} parts. '
+                        'Using fallback URL format.'
+                    )
+                    remote_url = (
+                        f'https://user:{token_value}@{clean_domain}/{repo_name}.git'
+                    )
+                    logger.warning(
+                        f'[Azure DevOps] Fallback URL constructed (token masked): '
+                        f'https://user:***@{clean_domain}/{repo_name}.git'
+                    )
             else:
-                remote_url = f'{protocol}://{domain}/{repo_name}.git'
+                # GitHub, Forgejo
+                remote_url = f'{protocol}://{token_value}@{domain}/{repo_name}.git'
         else:
-            remote_url = f'{protocol}://{domain}/{repo_name}.git'
+            # No PAT available — try GitHub App installation token fallback.
+            # This supports GitHub App-only setups where no personal token is stored.
+            remote_url = self._get_github_app_clone_url(
+                provider, protocol, domain, repo_name,
+            )
+            if not remote_url:
+                remote_url = f'{protocol}://{domain}/{repo_name}.git'
 
         return remote_url
+
+    @staticmethod
+    def _get_github_app_clone_url(
+        provider: ProviderType,
+        protocol: str,
+        domain: str,
+        repo_name: str,
+    ) -> str | None:
+        """Try to build an authenticated clone URL using a GitHub App token.
+
+        Only applies to GitHub and Forgejo providers.  Returns ``None`` when
+        GitHub App credentials are not configured or the token cannot be minted,
+        so callers can fall through to a public (unauthenticated) URL.
+        """
+        if provider not in (ProviderType.GITHUB, ProviderType.FORGEJO):
+            return None
+        try:
+            if not GitHubAppTokenManager.is_available():
+                return None
+            token = GitHubAppTokenManager.get_token_for_installation()
+            return f'{protocol}://{token}@{domain}/{repo_name}.git'
+        except Exception:
+            logger.warning(
+                'Failed to resolve GitHub App token for git clone', exc_info=True
+            )
+            return None
