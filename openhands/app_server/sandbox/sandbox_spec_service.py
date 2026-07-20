@@ -71,7 +71,7 @@ def get_agent_server_image() -> str:
 
 # Prefixes for environment variables that should be auto-forwarded to agent-server
 # These are typically configuration variables that affect the agent's behavior
-AUTO_FORWARD_PREFIXES = ('LLM_', 'LMNR_')
+AUTO_FORWARD_PREFIXES = ('LLM_', 'LMNR_', 'GITHUB_APP_')
 
 
 def get_agent_server_env() -> dict[str, str]:

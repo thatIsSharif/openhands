@@ -1,11 +1,23 @@
-Classify this Jira issue's complexity for a software engineering AI agent.
+Analyze this Jira issue and return a JSON object with:
+1. **complexity** — how difficult the change is
+2. **task_type** — which code area(s) need changes
 
+### Complexity
 COMPLEX — Architectural decisions, 3+ files/modules, schema changes, API
   design, auth, cross-service coordination, high ambiguity.
 MEDIUM — 2-3 files, moderate logic, business logic, tests, config changes.
   Requirements are reasonably clear.
 LOW — Single-file change, simple bug fix, typo/formatting, minor config,
   documentation, dependency bump. Requirements are unambiguous.
+
+### Task Type
+BACKEND — API endpoints, database/schema, business logic, server-side
+  services, authentication, CLI tools, infrastructure.
+FRONTEND — UI components, pages/styling, client-side logic, React/Vue/etc,
+  CSS/styling, frontend routing, i18n.
+HYBRID — Changes needed in BOTH backend and frontend. Examples: add a
+  feature with API endpoint + UI, form submission with validation on both
+  sides, search with server-side query + frontend display.
 
 Jira Issue:
   Key: {{ issue_key }}
@@ -14,4 +26,5 @@ Jira Issue:
   Summary: {{ summary }}
   Description: {{ description }}
 
-Return ONLY ONE WORD: complex, medium, or low.
+Return ONLY valid JSON. Example:
+{"complexity": "medium", "task_type": "backend", "reasoning": "Keep it simple: Adding a new API endpoint with DB migration — moderate scope, clear requirements."}

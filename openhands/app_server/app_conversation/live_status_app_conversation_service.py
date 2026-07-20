@@ -9,6 +9,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, AsyncGenerator, Sequence, cast
+from urllib.parse import urlparse
 from uuid import UUID, uuid4
 
 import httpx
@@ -561,16 +562,40 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
         conversation_url = None
         session_api_key = None
         if sandbox and sandbox.exposed_urls:
-            conversation_url = next(
+            agent_exposed = next(
                 (
-                    exposed_url.url
+                    exposed_url
                     for exposed_url in sandbox.exposed_urls
                     if exposed_url.name == AGENT_SERVER
                 ),
                 None,
             )
-            if conversation_url:
-                conversation_url += f'/api/conversations/{app_conversation_info.id.hex}'
+            if agent_exposed:
+                # When a public web_url is configured (e.g. via OH_WEB_URL)
+                # and the agent-exposed URL uses a local address, build the
+                # conversation URL from the public web_url so the browser
+                # can reach the agent-server through the reverse proxy.
+                if self.web_url:
+                    try:
+                        parsed = urlparse(agent_exposed.url)
+                        if parsed.hostname and parsed.hostname in (
+                            'localhost',
+                            '127.0.0.1',
+                        ):
+                            conversation_url = (
+                                f'{self.web_url}/runtime/{parsed.port}'
+                            )
+                        else:
+                            conversation_url = agent_exposed.url
+                    except Exception:
+                        conversation_url = agent_exposed.url
+                else:
+                    conversation_url = agent_exposed.url
+
+                if conversation_url:
+                    conversation_url += (
+                        f'/api/conversations/{app_conversation_info.id.hex}'
+                    )
             session_api_key = sandbox.session_api_key
 
         return AppConversation(

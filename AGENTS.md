@@ -44,6 +44,25 @@ then re-run the command to ensure it passes. Common issues include:
 - Be especially careful with `git reset --hard` after staging files, as it will remove accidentally staged files
 - When remote has new changes, use `git fetch upstream && git rebase upstream/<branch>` on the same branch
 
+## GitHub Authentication (Before Any Git Push)
+
+Before pushing, always discover available auth methods first:
+
+```bash
+env | grep -i GITHUB
+```
+
+Then use the appropriate method based on what's available:
+
+| If you find | Use this |
+|---|---|
+| `GITHUB_APP_ID`, `GITHUB_APP_INSTALLATION_ID`, `GITHUB_APP_PRIVATE_KEY_PATH` | Generate a short-lived token (JWT → installation token) and update the remote URL |
+| `GITHUB_TOKEN` | `git remote set-url origin https://${GITHUB_TOKEN}@github.com/owner/repo.git` |
+| `gh` CLI (check with `gh auth status`) | Run `gh auth setup-git` first, then `git push` |
+| Stale PAT in remote URL (`ghs_...` or `ghp_...`) | **Do NOT use it** — it's likely expired. Use one of the methods above instead. |
+
+Do NOT attempt to push with whatever token happens to be in the remote URL — verify it works first or replace it. Always inventory available auth methods before any git push.
+
 ## GitHub Actions
 
 - Pin external third-party actions to a full 40-character commit SHA, with the version tag in a trailing comment (e.g. `uses: owner/repo@<sha> # v1.2.3`). Do not use mutable tags (`@v1`) or branches for third-party actions.

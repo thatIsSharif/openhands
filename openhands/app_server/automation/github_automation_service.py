@@ -20,10 +20,7 @@ from openhands.app_server.utils.logger import openhands_logger as logger
 from .correlation import build_log_context
 from .execution_models import ExecutionState, SourceType
 from .execution_service import ExecutionService
-from .input_sanitizer import (
-    build_rejection_message,
-    has_dangerous_patterns,
-)
+from .input_sanitizer import has_dangerous_patterns
 from .openhands_client import OpenHandsClient
 from .prompt_renderer import render_prompt
 
@@ -252,8 +249,13 @@ class GitHubAutomationService:
             execution_id, ExecutionState.QUEUED
         )
 
-        # Build the comment endpoint URL from the incoming request
+        # Build the comment endpoint URL from the incoming request.
+        # Use X-Forwarded-Proto if present (Nginx terminates TLS and forwards
+        # as HTTP, so request.base_url may return http:// incorrectly).
+        forwarded_proto = request.headers.get('x-forwarded-proto', 'http')
         base_url = str(request.base_url).rstrip('/')
+        if forwarded_proto == 'https' and base_url.startswith('http://'):
+            base_url = 'https://' + base_url[7:]
         comment_endpoint = f'{base_url}/api/v1/git/github/webhook/comment'
 
         # ── Input sanitization (Layer 1) ────────────────────────────
@@ -406,8 +408,13 @@ class GitHubAutomationService:
             execution_id, ExecutionState.QUEUED
         )
 
-        # Build the comment endpoint URL from the incoming request
+        # Build the comment endpoint URL from the incoming request.
+        # Use X-Forwarded-Proto if present (Nginx terminates TLS and forwards
+        # as HTTP, so request.base_url may return http:// incorrectly).
+        forwarded_proto = request.headers.get('x-forwarded-proto', 'http')
         base_url = str(request.base_url).rstrip('/')
+        if forwarded_proto == 'https' and base_url.startswith('http://'):
+            base_url = 'https://' + base_url[7:]
         comment_endpoint = f'{base_url}/api/v1/git/github/webhook/comment'
 
         # ── Input sanitization (Layer 1) ────────────────────────────

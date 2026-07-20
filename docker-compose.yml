@@ -27,15 +27,21 @@ services:
       - OH_AUTOMATION_DEFAULT_MAX_BUDGET=${OH_AUTOMATION_DEFAULT_MAX_BUDGET}
       - OH_AUTOMATION_DEFAULT_MAX_ITERATIONS=${OH_AUTOMATION_DEFAULT_MAX_ITERATIONS}
 
-      # GitHub App authentication (replaces PAT)
-      - GITHUB_APP_ID=${GITHUB_APP_ID}
-      - GITHUB_APP_PRIVATE_KEY=${GITHUB_APP_PRIVATE_KEY}
+      # # GitHub PAT for cloning repos
+      # - GITHUB_PAT_TOKEN=${GITHUB_PAT_TOKEN}
+
       - GITHUB_APP_INSTALLATION_ID=${GITHUB_APP_INSTALLATION_ID}
+      - GITHUB_APP_ID=${GITHUB_APP_ID}
+      # - GITHUB_APP_PRIVATE_KEY=${GITHUB_APP_PRIVATE_KEY}
+      - GITHUB_APP_PRIVATE_KEY_PATH=/etc/github-app.pem
+
+      - SANDBOX_VOLUMES=/home/ec2-user/.ssh/github-app.pem:/etc/github-app.pem:ro
 
       # Model selection for complexity tiers
       - OH_JIRA_COMPLEX_MODEL=${OH_JIRA_COMPLEX_MODEL}
       - OH_JIRA_MEDIUM_MODEL=${OH_JIRA_MEDIUM_MODEL}
       - OH_JIRA_LOW_MODEL=${OH_JIRA_LOW_MODEL}
+      - OH_WEB_URL=https://openhands.letmdevops.site
 
       # Analysis LLM (separate from task LLM)
       - OH_JIRA_ANALYSIS_MODEL=${OH_JIRA_ANALYSIS_MODEL}
@@ -49,6 +55,7 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ~/.openhands:/.openhands
+      - ~/.ssh/github-app.pem:/etc/github-app.pem:ro
       - ${WORKSPACE_BASE:-$PWD/workspace}:/opt/workspace_base
     pull_policy: build
     stdin_open: true

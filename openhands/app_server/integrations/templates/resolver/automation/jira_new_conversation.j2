@@ -5,6 +5,7 @@ You are working on {{ repo_label }} repository for Jira issue {{ issue_key }}.
 Issue Key: {{ issue_key }}
 Title: {{ title }}
 Type: {{ issue_type }} | Priority: {{ priority }}
+Task Type: {{ task_type | capitalize }}
 
 Description:
 {{ description }}
@@ -13,6 +14,14 @@ Repository: {{ repository }}
 Repository Label: {{ repo_label }}
 Default Branch: {{ default_branch }}
 Working Branch: {{ branch }}
+
+{% if task_type == 'hybrid' and other_repos %}
+## Hybrid Task — Both Repositories Likely Need Changes
+
+This issue has been classified as a **HYBRID** task, meaning changes are
+expected in **both** the {{ repo_label }} and other repositories listed below.
+Plan your work accordingly across all repositories.
+{% endif %}
 
 {% if other_repos %}
 ## Other Repositories Available (Clone if needed)
@@ -27,7 +36,7 @@ To clone this repository when needed, run:
 ```
 git clone --depth=1 https://github.com/{{ repo.owner }}/{{ repo.repository }}.git /workspace/{{ repo.label }}
 ```
-Base your work off `main`. If `main` does not exist, use `master`.
+Base your work off `{{ repo.default_branch | default('main') }}`. If no default branch is specified, use `main`.
 {% endfor %}
 {% endif %}
 
@@ -80,7 +89,7 @@ General workflow:
 2. For each repository that needs changes:
    - Clone the repository (see commands above)
    - Apply the Gate Rule for that repository
-   - Base work off `main` (fallback to `master` if `main` doesn't exist)
+   - Base your work off the repository's default branch. If it is not specified, use main.
    - Create a branch using the Working Branch name specified for that repository
    - Make the necessary changes
    - Create a commit and PR
@@ -105,6 +114,9 @@ General workflow:
 9. After posting the summary comment, also post the token usage by sending
    a POST request to:
    POST {{ token_usage_endpoint }}
+   Headers:
+     Content-Type: application/json
+     X-Session-API-Key: $OH_SESSION_API_KEYS_0
    {
      "issue_key": "{{ issue_key }}",
      "body": ""

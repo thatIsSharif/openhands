@@ -303,8 +303,13 @@ async def _handle_comment_created(
 
             agent_server_url = replace_localhost_hostname_for_docker(agent_server_url)
 
-            # Build the token-usage endpoint from the request
+            # Build the token-usage endpoint from the request.
+            # Use X-Forwarded-Proto if present (Nginx terminates TLS and forwards
+            # as HTTP, so request.base_url may return http:// incorrectly).
+            forwarded_proto = request.headers.get('x-forwarded-proto', 'http')
             base_url = str(request.base_url).rstrip('/')
+            if forwarded_proto == 'https' and base_url.startswith('http://'):
+                base_url = 'https://' + base_url[7:]
             token_usage_url = f'{base_url}/api/v1/jira/start/token-usage'
 
             # ── Input sanitization (Layer 1) ────────────────────────
